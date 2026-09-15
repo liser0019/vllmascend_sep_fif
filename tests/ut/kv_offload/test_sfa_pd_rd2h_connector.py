@@ -11,7 +11,7 @@ import httpx
 import msgspec
 import pytest
 
-pytest.importorskip("torch")
+torch = pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
 from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
@@ -174,6 +174,27 @@ def _make_read_thread() -> MembPullReadThread:
         get_offload_layer_id=lambda _: 0,
     )
     return thread
+
+
+def test_a5_consumer_registers_host_and_hbm_pull_destinations():
+    worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    k_cpu = torch.empty(16, dtype=torch.uint8)
+    v_cpu = torch.empty(32, dtype=torch.uint8)
+    indexer = torch.empty(48, dtype=torch.uint8)
+    worker._cpu_pools = [(k_cpu, v_cpu)]
+    worker._indexer_tensors = [indexer]
+    worker._indexer_scale_tensors = [None]
+
+    register_path = "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker.global_memfabric_te.register_buffer"
+    with patch(register_path) as register_buffer:
+        worker._register_rank_local_pull_destinations()
+
+    ptrs, lengths = register_buffer.call_args.args
+    assert set(zip(ptrs, lengths)) == {
+        (k_cpu.data_ptr(), k_cpu.nbytes),
+        (v_cpu.data_ptr(), v_cpu.nbytes),
+        (indexer.data_ptr(), indexer.nbytes),
+    }
 
 
 def _make_layer(

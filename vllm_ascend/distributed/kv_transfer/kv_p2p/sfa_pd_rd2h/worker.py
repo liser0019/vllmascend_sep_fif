@@ -406,8 +406,12 @@ class SFAPDRD2HConsumerWorker:
                 has_indexer=indexer_t is not None,
             )
 
-        # Create memfabric engine (no registration)
+        # DEVICE_URMA requires every local transfer destination to be
+        # registered with smem_trans. Register HVA for the Host pool; DVA is
+        # reserved for the AIV offload operators that promote KV into HBM.
         self._ensure_engine()
+        if self.offload_manager.rank_local_host_pool:
+            self._register_rank_local_pull_destinations()
         read_state = self._build_consumer_read_state()
         # Start MembPullReadThread (ZMQ ROUTER + memfabric read)
         self._mf_read_thread = MembPullReadThread(
@@ -424,11 +428,25 @@ class SFAPDRD2HConsumerWorker:
             error = self._mf_read_thread.startup_error
             self._mf_read_thread.stop()
             raise RuntimeError("SFAPD D-side read thread failed during startup") from error
+        pool_scope = "rank-local" if self.offload_manager.rank_local_host_pool else "TP-shared"
         logger.info(
-            "SFAPDRD2H D-side registered (memfabric pull): %d indexer + %d TP-shared main layers",
+            "SFAPDRD2H D-side registered (memfabric pull): %d indexer + %d %s main layers",
             sum(t is not None for t in self._indexer_tensors),
             len(main_names),
+            pool_scope,
         )
+
+    def _register_rank_local_pull_destinations(self) -> None:
+        destinations = {
+            "main_cpu": self._cpu_pools,
+            "indexer": self._indexer_tensors,
+            "indexer_scale": self._indexer_scale_tensors,
+        }
+        register_regions = collect_storage_merged_register_regions(destinations)
+        validate_register_region_count(register_regions)
+        if not register_regions.ptrs:
+            raise RuntimeError("A5 MemFabric pull has no local destination buffers to register")
+        global_memfabric_te.register_buffer(register_regions.ptrs, register_regions.lengths)
 
     def shutdown(self) -> None:
         read_thread = getattr(self, "_mf_read_thread", None)

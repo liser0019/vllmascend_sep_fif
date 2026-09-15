@@ -89,7 +89,7 @@ Prefill HBM (registered source)
         |
         | MemFabric DEVICE_URMA pull, destination = HVA
         v
-Decode rank-local MemFabric Host pool
+Decode rank-local MemFabric Host pool (registered destination)
         |
         | offload.get_dva(HVA), once during registration
         v
@@ -103,6 +103,11 @@ The HVA remains the address of the CPU tensor and the local destination passed
 to `batch_transfer_sync_read`. The DVA is stored only in the operator address
 tables. This separation follows the CANN mapped-Host-memory contract and the
 MemFabric `offload_get_dva` API contract.
+
+After the Decode TransferEngine is initialized, every rank registers its Host
+K/V pool HVA and rank-local indexer HBM destinations before starting the pull
+thread. Registration publishes the buffers to `smem_trans` and prepares them
+for DEVICE_URMA. The DVA is never passed to `register_memory`.
 
 ### 3.2 Pool initialization
 
@@ -209,9 +214,9 @@ the transfer API remains the CPU-visible HVA. This approach is not used.
 - Main MLA P-to-D traffic is also replicated across Decode TP ranks.
 - The static implementation cannot prove CANN, firmware, driver, huge-page,
   and URMA compatibility without an A5 environment.
-- Enabling direct registration of the Decode Host pool with the transfer engine
-  may improve URMA performance, but it should be evaluated separately against
-  MemFabric's current safe-copy path and registration lifecycle.
+- Registering many per-layer Host and indexer regions can add startup time and
+  consume registration resources. Registration occurs once before the pull
+  thread starts and is kept out of the inference hot path.
 
 ## 6. Validation Plan
 
@@ -221,7 +226,8 @@ the transfer API remains the CPU-visible HVA. This approach is not used.
 - Ruff lint and format checks.
 - Unit tests for A3 shared-pool initialization, A5 local-pool initialization,
   protocol rejection, HVA/DVA separation, per-rank CPU-cache ownership, and
-  full main-KV descriptor generation on every A5 TP rank.
+  full main-KV descriptor generation and destination registration on every A5
+  TP rank.
 
 ### 6.2 A5 build checks
 
