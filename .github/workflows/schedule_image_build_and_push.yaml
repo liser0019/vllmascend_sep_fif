@@ -231,7 +231,7 @@ jobs:
     runs-on: linux-amd64-cpu-4
     steps:
       - name: Dispatch sync-vllm-ascend
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
           script: |
