@@ -263,6 +263,14 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             manager.resident_seq_lens_npu[:rows],
         )
 
+    @staticmethod
+    def _update_resident_seq_lens(manager, decode_seq_lens: torch.Tensor) -> None:
+        resident_seq_lens = manager.resident_seq_lens_npu
+        source = decode_seq_lens
+        if source.device != resident_seq_lens.device or source.dtype != resident_seq_lens.dtype:
+            source = source.to(device=resident_seq_lens.device, dtype=resident_seq_lens.dtype)
+        resident_seq_lens[: source.shape[0]].copy_(source)
+
     def _offload_layer_name(self) -> str:
         layer_name = self.layer_name or self._current_layer_name
         if layer_name is None:
@@ -1095,6 +1103,10 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         if decode_topk.ndim != 2:
             raise ValueError("Sparse KV offload top-k must have [tokens, topk] shape")
 
+        # SFA needs the real visible KV length for every resident row. The
+        # resident buffer capacity is only a storage limit, not a sequence
+        # length; using it here corrupts position and causal-mask semantics.
+        self._update_resident_seq_lens(manager, decode_seq_lens)
         (
             resident_k,
             resident_v,

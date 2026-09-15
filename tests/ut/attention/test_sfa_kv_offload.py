@@ -132,6 +132,22 @@ def test_cpu_cache_pair_respects_shared_and_rank_local_pool_ownership(
     assert AscendSFAKVOffloadImpl._cpu_cache_pair(manager, "model.layers.0.self_attn") == expected
 
 
+def test_resident_seq_lens_use_actual_decode_lengths_instead_of_capacity():
+    manager = SimpleNamespace(
+        resident_seq_lens_npu=torch.full((4,), 4096, dtype=torch.int32),
+    )
+
+    AscendSFAKVOffloadImpl._update_resident_seq_lens(
+        manager,
+        torch.tensor([5, 9], dtype=torch.int64),
+    )
+
+    torch.testing.assert_close(
+        manager.resident_seq_lens_npu,
+        torch.tensor([5, 9, 4096, 4096], dtype=torch.int32),
+    )
+
+
 def _make_fused_overlap_impl() -> AscendSFAKVOffloadImpl:
     impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
     impl.block_size = 4
