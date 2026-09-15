@@ -108,6 +108,30 @@ def test_pd_decode_consumer_still_rejects_long_prefill_classification():
     assert metadata.num_decode_tokens == 0
 
 
+@pytest.mark.parametrize(
+    ("tp_rank", "rank_local_host_pool", "expected"),
+    [
+        (0, False, ("k0", "v0")),
+        (1, False, (None, None)),
+        (1, True, ("k1", "v1")),
+    ],
+)
+def test_cpu_cache_pair_respects_shared_and_rank_local_pool_ownership(
+    tp_rank,
+    rank_local_host_pool,
+    expected,
+):
+    manager = SimpleNamespace(
+        tp_rank=tp_rank,
+        rank_local_host_pool=rank_local_host_pool,
+        k_caches_cpu=["k0", "k1"],
+        v_caches_cpu=["v0", "v1"],
+        _get_offload_layer_id=lambda _layer_name: tp_rank,
+    )
+
+    assert AscendSFAKVOffloadImpl._cpu_cache_pair(manager, "model.layers.0.self_attn") == expected
+
+
 def _make_fused_overlap_impl() -> AscendSFAKVOffloadImpl:
     impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
     impl.block_size = 4

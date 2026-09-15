@@ -247,8 +247,14 @@ On A5 nodes, add `"memfabric_transfer_protocol": "device_urma"` to
 | Parameter | Description |
 | :--- | :--- |
 | `topk_buffer_size` | Device hot-buffer size. It must be at least `index_topk` and divisible by `block_size`. Twice `index_topk` is a practical starting point. |
-| `dram_size_per_dp_GB` | Host memory reserved per DP rank. It must hold the full KV cache. TP ranks share this pool. |
+| `dram_size_per_dp_GB` | Host memory capacity for one complete sparse KV pool. On A3, TP ranks share one pool per DP rank. On A5, every TP rank owns one complete mapped pool, so total Host memory per DP rank is approximately this value multiplied by TP size. |
 | `keep_device_kv_cache` | Debug-only option that retains the full device KV cache. Keep it `false` in production. |
+
+On A5, the Decode process uses a rank-local MemFabric pool backed by
+`OFFLOAD_FLAG_GIANT_PAGE`. MemFabric exposes a Host virtual address for CPU and
+URMA access and a separate Device virtual address for NPU operators. Every TP
+rank pulls the complete main MLA KV into its local pool. This increases Host
+memory and P-to-D traffic compared with A3's shared-pool mode.
 
 ## 4. Start the P/D Proxy
 
@@ -277,6 +283,8 @@ For multi-node deployment, advertise reachable addresses instead of
 - The MemFabric data-path protocol is selected by launch configuration instead
   of hardware detection: use `sdma` (default) or `device_rdma` on A3 series and
   `device_urma` on A5 series, identically on Prefill and Decode.
+- `use_fused_overlap` is not supported with A5 sparse KV offload because that
+  path still assumes one TP-shared Host pool.
 - Layerwise buffer reuse cannot currently be combined with
   `MooncakeLayerwiseConnector` because per-buffer transfer completion gating is
   not yet implemented. Support is planned in a follow-up update.

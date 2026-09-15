@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Worker side of the decode-offload SFA Remote D2H connector.
 
-D (``kv_consumer``): binds to :class:`SparseKVOffloadManager`'s TP-shared CPU
-KV pool and receives indexer KV into rank-local HBM. Every TP rank pulls a
-disjoint part of main MLA KV and its rank-local indexer KV. Decode KV continues
-to be written directly to the same CPU pool by the decode-offload manager.
+D (``kv_consumer``): binds to :class:`SparseKVOffloadManager`'s CPU KV pool and
+receives indexer KV into rank-local HBM. A3 ranks pull disjoint parts into one
+TP-shared pool. A5 ranks each pull the full main MLA KV into their own mapped
+Host pool. Decode KV is written directly to the same pool.
 
 P (``kv_producer``): registers its HBM KV with memfabric and runs a pull-mode
 sending thread that notifies D to read (no RDMA push). A per-layer
@@ -318,8 +318,9 @@ class SFAPDRD2HConsumerWorker:
             layer_metadata=self.layer_metadata,
             main_name_to_idx=self._main_name_to_idx,
             cpu_pools=self._cpu_pools,
-            main_gva_bases=self._main_gva_bases,
+            main_hva_bases=self._main_hva_bases,
             main_block_lens=self._main_block_lens,
+            replicate_main_pool=self.offload_manager.rank_local_host_pool,
             indexer_tensors=self._indexer_tensors,
             indexer_scale_tensors=self._indexer_scale_tensors,
             dest_blocks_by_req=self._dest_blocks_by_req,
@@ -342,15 +343,15 @@ class SFAPDRD2HConsumerWorker:
         self._main_name_to_idx = {n: i for i, n in enumerate(main_names)}
         k_caches_cpu = self.offload_manager.k_caches_cpu
         v_caches_cpu = self.offload_manager.v_caches_cpu
-        gvas_k = self.offload_manager.gvas_k_bases
-        gvas_v = self.offload_manager.gvas_v_bases
-        if len(gvas_k) != len(main_names) or len(gvas_v) != len(main_names):
-            raise RuntimeError("SparseKVOffloadManager shared CPU GVA/layer count mismatch")
-        self._main_gva_bases = list(zip(gvas_k, gvas_v))
+        hvas_k = self.offload_manager.hvas_k_bases
+        hvas_v = self.offload_manager.hvas_v_bases
+        if len(hvas_k) != len(main_names) or len(hvas_v) != len(main_names):
+            raise RuntimeError("SparseKVOffloadManager CPU HVA/layer count mismatch")
+        self._main_hva_bases = list(zip(hvas_k, hvas_v))
         self._main_block_lens = self.offload_manager.cpu_block_lens
         if len(self._main_block_lens) != len(main_names):
             raise RuntimeError("SparseKVOffloadManager shared CPU block-size/layer count mismatch")
-        if self.tp_rank == 0:
+        if self.tp_rank == 0 or self.offload_manager.rank_local_host_pool:
             if len(k_caches_cpu) != len(main_names) or len(v_caches_cpu) != len(main_names):
                 raise RuntimeError("SparseKVOffloadManager CPU pool/layer count mismatch")
             self._cpu_pools = list(zip(k_caches_cpu, v_caches_cpu))

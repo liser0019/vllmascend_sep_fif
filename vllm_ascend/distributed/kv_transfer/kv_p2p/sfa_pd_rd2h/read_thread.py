@@ -39,8 +39,9 @@ class ConsumerReadState:
     layer_metadata: dict[str, Any]
     main_name_to_idx: dict[str, int]
     cpu_pools: list[tuple[Any, Any] | None]
-    main_gva_bases: list[tuple[int, int]]
+    main_hva_bases: list[tuple[int, int]]
     main_block_lens: list[tuple[int, int]]
+    replicate_main_pool: bool
     indexer_tensors: list[Any | None]
     indexer_scale_tensors: list[Any | None]
     dest_blocks_by_req: dict[str, tuple[list[int], list[int]]]
@@ -375,7 +376,7 @@ class MembPullReadThread(threading.Thread):
         p_has_indexer = bool(p_meta.get("has_indexer", len(p_base_addrs) > main_tensor_count))
 
         try:
-            k_cpu_ptr, v_cpu_ptr = state.main_gva_bases[offload_id]
+            k_cpu_ptr, v_cpu_ptr = state.main_hva_bases[offload_id]
             d_k_len, d_v_len = state.main_block_lens[offload_id]
         except IndexError as error:
             raise RuntimeError(f"MembPull shared CPU pool metadata is missing for {layer_name}") from error
@@ -556,15 +557,16 @@ class MembPullReadThread(threading.Thread):
         n_main = 0
         n_indexer = 0
 
-        # Main MLA is replicated across P ranks and already split across D TP; only the
-        # group's first contributor pulls it, so it is neither duplicated nor fine-split.
+        # Main MLA is replicated across P ranks, so only the group's first P
+        # contributor supplies it. A3 splits the write across one TP-shared
+        # Host pool; A5 fills every rank-local Host pool completely.
         pull_main = layer["k_cpu_ptr"] is not None and layer["v_cpu_ptr"] is not None and group_member_idx == 0
         if pull_main and len(p_main_block_ids) != len(d_main_ids):
             raise RuntimeError(
                 f"MembPull main block count mismatch for req {ext_req_id}: "
                 f"P={len(p_main_block_ids)}, D={len(d_main_ids)}"
             )
-        if pull_main:
+        if pull_main and not state.replicate_main_pool:
             owned_start, owned_end = _tp_block_range(
                 len(d_main_ids),
                 self.tp_rank,
@@ -765,7 +767,7 @@ class MembPullReadThread(threading.Thread):
                     group_member_idx == 0
                     and layer["k_cpu_ptr"] is not None
                     and layer["v_cpu_ptr"] is not None
-                    and owned_main_end > owned_main_start
+                    and (self._state.replicate_main_pool or owned_main_end > owned_main_start)
                 )
                 owns_requested_indexer = (
                     layer["indexer"] is not None and read_info is not None and bool(read_info["d_indexer_ids"])

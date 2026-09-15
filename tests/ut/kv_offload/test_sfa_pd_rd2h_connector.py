@@ -165,8 +165,9 @@ def _make_read_thread() -> MembPullReadThread:
         layer_metadata={},
         main_name_to_idx={},
         cpu_pools=[],
-        main_gva_bases=[],
+        main_hva_bases=[],
         main_block_lens=[],
+        replicate_main_pool=False,
         indexer_tensors=[],
         indexer_scale_tensors=[],
         dest_blocks_by_req={"req-0": ([3, 4], [8])},
@@ -243,12 +244,12 @@ def test_non_tp0_read_descriptors_still_transfer_indexer():
     assert info["n_indexer"] == 1
 
 
-def test_non_tp0_resolves_broadcast_main_gva_without_cpu_tensor():
+def test_non_tp0_resolves_broadcast_main_hva_without_cpu_tensor():
     thread = _make_read_thread()
     layer_name = "model.layers.0.self_attn"
     thread._state.main_name_to_idx = {layer_name: 0}
     thread._state.cpu_pools = [None]
-    thread._state.main_gva_bases = [(3000, 4000)]
+    thread._state.main_hva_bases = [(3000, 4000)]
     thread._state.main_block_lens = [(10, 20)]
     thread._state.indexer_tensors = [None]
     thread._state.indexer_scale_tensors = [None]
@@ -279,7 +280,7 @@ def test_resolve_read_layer_rejects_asymmetric_indexer_scale_presence(p_has_scal
     thread = _make_read_thread()
     layer_name = "model.layers.0.self_attn"
     thread._state.main_name_to_idx = {layer_name: 0}
-    thread._state.main_gva_bases = [(3000, 4000)]
+    thread._state.main_hva_bases = [(3000, 4000)]
     thread._state.main_block_lens = [(10, 20)]
     thread._state.indexer_tensors = [
         SimpleNamespace(
@@ -414,6 +415,31 @@ def test_tp_ranks_split_main_blocks_into_disjoint_contiguous_ranges():
         assert lengths == expected_lengths
         assert info is not None
         assert info["n_main"] == 2
+
+
+def test_rank_local_pools_pull_complete_main_kv_on_every_tp_rank():
+    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
+
+    for tp_rank in range(2):
+        thread = _make_read_thread()
+        thread.tp_rank = tp_rank
+        thread._state.tp_size = 2
+        thread._state.replicate_main_pool = True
+        thread._state.dest_blocks_by_req["req-0"] = ([0, 1, 2, 3], [])
+
+        local, peer, lengths, info = thread._build_req_descriptors(
+            layer,
+            "req-0",
+            p_main_block_ids=[0, 1, 2, 3],
+            p_indexer_block_ids=[],
+            want_info=True,
+        )
+
+        assert local == [3000, 4000]
+        assert peer == [1000, 2000]
+        assert lengths == [40, 80]
+        assert info is not None
+        assert info["n_main"] == 4
 
 
 def test_tp_rank_without_blocks_in_small_chunk_acknowledges_without_read():
@@ -1241,8 +1267,9 @@ def _make_indexer_only_read_thread(indexer_dest: list[int], main_dest: list[int]
         layer_metadata={},
         main_name_to_idx={},
         cpu_pools=[],
-        main_gva_bases=[],
+        main_hva_bases=[],
         main_block_lens=[],
+        replicate_main_pool=False,
         indexer_tensors=[],
         indexer_scale_tensors=[],
         dest_blocks_by_req={"req-0": (main_dest or [], indexer_dest)},

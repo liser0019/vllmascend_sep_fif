@@ -231,7 +231,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
     @staticmethod
     def _cpu_cache_pair(manager, layer_name: str):
         layer_id = manager._get_offload_layer_id(layer_name)
-        if manager.tp_rank != 0:
+        if manager.tp_rank != 0 and not manager.rank_local_host_pool:
             return None, None
         return manager.k_caches_cpu[layer_id], manager.v_caches_cpu[layer_id]
 

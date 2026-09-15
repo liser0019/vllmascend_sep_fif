@@ -4879,6 +4879,7 @@ class NPUModelRunner(GPUModelRunner):
                                     self.tp_rank,
                                     self.sparse_kv_offload_config.keep_device_kv_cache,
                                     self._allocate_int8_cache_tensor,
+                                    self.sparse_kv_offload_manager.rank_local_host_pool,
                                 )
                             )
                         else:
@@ -4892,6 +4893,7 @@ class NPUModelRunner(GPUModelRunner):
                                             self.tp_rank,
                                             self.sparse_kv_offload_config.keep_device_kv_cache,
                                             self._allocate_int8_cache_tensor,
+                                            self.sparse_kv_offload_manager.rank_local_host_pool,
                                         )
                                     )
                         continue

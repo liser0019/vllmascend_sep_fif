@@ -61,7 +61,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         with (
             patch.object(manager_module, "_SPARSE_KV_OFFLOAD_MANAGER", None),
             patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A2),
-            self.assertRaisesRegex(RuntimeError, "Sparse KV offload is only support on A3"),
+            self.assertRaisesRegex(RuntimeError, "supports Atlas A3 and A5"),
         ):
             manager_module.init_sparse_kv_offload_manager(None, None, None)
 
@@ -325,6 +325,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                         return_value=MagicMock(),
                     ),
                     patch.object(manager_module, "_sparse_kv_ops", return_value=MagicMock()),
+                    patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A3),
                 ):
                     SparseKVOffloadManager(
                         vllm_config,
@@ -344,6 +345,95 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 self.assertEqual(initialized_config.world_size, 2)
                 self.assertEqual(initialized_config.rank_id, rank)
                 tp_group.barrier.assert_called_once_with()
+
+    def test_a5_manager_uses_rank_local_urma_pool(self):
+        vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
+        vllm_config.kv_transfer_config = SimpleNamespace(
+            kv_connector_extra_config={"memfabric_transfer_protocol": "device_urma"}
+        )
+        planned_pool_size = 4096
+        offload_backend = SimpleNamespace(
+            OffloadConfig=lambda: SimpleNamespace(),
+            OFFLOAD_FLAG_GIANT_PAGE=1,
+            Scene=SimpleNamespace(LOCAL="local", SHARED="shared"),
+            get_dva=MagicMock(return_value=0x2000),
+            initialize=MagicMock(return_value=0),
+        )
+        tp_group = SimpleNamespace(barrier=MagicMock())
+
+        with (
+            patch.object(manager_module, "get_tensor_model_parallel_rank", return_value=1),
+            patch.object(manager_module, "get_tensor_model_parallel_world_size", return_value=2),
+            patch.object(manager_module, "get_tp_group", return_value=tp_group),
+            patch.object(
+                manager_module,
+                "get_sparse_kv_offload_cpu_pool_size_bytes",
+                return_value=planned_pool_size,
+            ),
+            patch.object(manager_module, "offload", offload_backend, create=True),
+            patch.object(manager_module.torch, "zeros", return_value=MagicMock()),
+            patch.object(manager_module.torch, "empty", return_value=MagicMock()),
+            patch.object(manager_module, "_sparse_kv_ops", return_value=MagicMock()),
+            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A5),
+        ):
+            manager = SparseKVOffloadManager(vllm_config, kv_cache_config, offload_config)
+
+        initialized_config = offload_backend.initialize.call_args.args[0]
+        self.assertTrue(manager.rank_local_host_pool)
+        self.assertEqual(initialized_config.reserve_size, planned_pool_size)
+        self.assertEqual(initialized_config.alloc_size, planned_pool_size)
+        self.assertEqual(initialized_config.world_size, 1)
+        self.assertEqual(initialized_config.rank_id, 0)
+        self.assertEqual(initialized_config.scene, "local")
+        self.assertEqual(initialized_config.flags, 1)
+        tp_group.barrier.assert_called_once_with()
+
+    def test_a5_manager_requires_device_urma_for_pd(self):
+        vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
+        vllm_config.kv_transfer_config = SimpleNamespace(
+            kv_connector_extra_config={"memfabric_transfer_protocol": "sdma"}
+        )
+        offload_backend = SimpleNamespace(
+            OffloadConfig=lambda: SimpleNamespace(),
+            OFFLOAD_FLAG_GIANT_PAGE=1,
+            Scene=SimpleNamespace(LOCAL="local", SHARED="shared"),
+            get_dva=MagicMock(return_value=0x2000),
+            initialize=MagicMock(return_value=0),
+        )
+
+        with (
+            patch.object(manager_module, "get_tensor_model_parallel_rank", return_value=0),
+            patch.object(manager_module, "get_tensor_model_parallel_world_size", return_value=1),
+            patch.object(manager_module, "get_tp_group", return_value=SimpleNamespace()),
+            patch.object(manager_module, "get_sparse_kv_offload_cpu_pool_size_bytes", return_value=4096),
+            patch.object(manager_module, "offload", offload_backend, create=True),
+            patch.object(manager_module.torch, "zeros", return_value=MagicMock()),
+            patch.object(manager_module.torch, "empty", return_value=MagicMock()),
+            patch.object(manager_module, "_sparse_kv_ops", return_value=MagicMock()),
+            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A5),
+            self.assertRaisesRegex(ValueError, "device_urma"),
+        ):
+            SparseKVOffloadManager(vllm_config, kv_cache_config, offload_config)
+
+        offload_backend.initialize.assert_not_called()
+
+    def test_rank_local_pool_keeps_host_and_device_addresses_separate(self):
+        manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+        manager.rank_local_host_pool = True
+        manager.num_layers = 1
+        manager.kv_cache_config = SimpleNamespace(num_blocks=4)
+        manager.k_caches_cpu = [SimpleNamespace(data_ptr=lambda: 0x1000, numel=lambda: 40, element_size=lambda: 2)]
+        manager.v_caches_cpu = [SimpleNamespace(data_ptr=lambda: 0x2000, numel=lambda: 20, element_size=lambda: 2)]
+        offload_backend = SimpleNamespace(get_dva=MagicMock(side_effect=[0xA000, 0xB000]))
+
+        with patch.object(manager_module, "offload", offload_backend, create=True):
+            manager._initialize_pool_address_tables()
+
+        self.assertEqual(manager.hvas_k_bases, [0x1000])
+        self.assertEqual(manager.hvas_v_bases, [0x2000])
+        self.assertEqual(manager.dvas_k_bases, [0xA000])
+        self.assertEqual(manager.dvas_v_bases, [0xB000])
+        self.assertEqual(manager.cpu_block_lens, [(20, 10)])
 
     def test_manager_rejects_pool_larger_than_dram_limit(self):
         vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
@@ -378,6 +468,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             patch.object(manager_module.torch, "zeros", return_value=MagicMock()),
             patch.object(manager_module.torch, "empty", return_value=MagicMock()),
             patch.object(manager_module, "_sparse_kv_ops", return_value=MagicMock()),
+            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A3),
             self.assertRaisesRegex(ValueError, "exceeds DRAM limit"),
         ):
             SparseKVOffloadManager(
