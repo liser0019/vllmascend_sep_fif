@@ -271,6 +271,37 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             source = source.to(device=resident_seq_lens.device, dtype=resident_seq_lens.dtype)
         resident_seq_lens[: source.shape[0]].copy_(source)
 
+    @staticmethod
+    def _compute_decode_token_lengths(
+        token_to_req: torch.Tensor,
+        cumulative_query_lens: torch.Tensor,
+        request_kv_lens: torch.Tensor,
+        num_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Expand request lengths into the causal KV length of each token."""
+        device = request_kv_lens.device
+        output_dtype = request_kv_lens.dtype
+        token_request_indices = token_to_req[:num_tokens].to(device=device, dtype=torch.long)
+        request_cumulative_query_lens = cumulative_query_lens.to(device=device, dtype=torch.long)
+        request_kv_lens_long = request_kv_lens.to(device=device, dtype=torch.long)
+        request_query_lens = torch.diff(
+            request_cumulative_query_lens,
+            prepend=request_cumulative_query_lens.new_zeros(1),
+        )
+        request_token_starts = request_cumulative_query_lens - request_query_lens
+        local_token_offsets = torch.arange(num_tokens, device=device, dtype=torch.long)
+        local_token_offsets -= request_token_starts[token_request_indices]
+        token_kv_lens = (
+            request_kv_lens_long[token_request_indices]
+            - request_query_lens[token_request_indices]
+            + local_token_offsets
+            + 1
+        )
+        return (
+            token_kv_lens.to(dtype=output_dtype).contiguous(),
+            request_query_lens.to(dtype=output_dtype).contiguous(),
+        )
+
     def _offload_layer_name(self) -> str:
         layer_name = self.layer_name or self._current_layer_name
         if layer_name is None:
@@ -702,7 +733,6 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         attn_metadata: M,
         *,
         num_tokens: int,
-        num_reqs: int,
         full_q_actual_seq: torch.Tensor,
         full_kv_actual_seq: torch.Tensor,
         full_kv_block_table: torch.Tensor,
@@ -710,17 +740,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         assert attn_metadata.token_to_req is not None
         device = full_q_actual_seq.device
         token_to_req = attn_metadata.token_to_req[:num_tokens].to(device=device, dtype=torch.long)
-        req_cum_q = full_q_actual_seq.to(device=device, dtype=torch.long)
-        req_seq_lens = full_kv_actual_seq.to(device=device, dtype=torch.long)
-        req_q_lens = torch.diff(req_cum_q, prepend=req_cum_q.new_zeros(1))
-        token_starts = torch.zeros(num_reqs, dtype=torch.long, device=device)
-        if num_reqs > 1:
-            token_starts[1:] = req_cum_q[:-1]
-        local_offsets = torch.arange(num_tokens, device=device, dtype=torch.long) - token_starts[token_to_req]
-        token_kv_lens = (
-            (req_seq_lens[token_to_req] - req_q_lens[token_to_req] + local_offsets + 1)
-            .to(dtype=torch.int32)
-            .contiguous()
+        token_kv_lens, _ = self._compute_decode_token_lengths(
+            token_to_req,
+            full_q_actual_seq,
+            full_kv_actual_seq,
+            num_tokens,
         )
         if not get_forward_context().capturing and bool((token_kv_lens <= 0).any().item()):
             raise RuntimeError(
@@ -839,7 +863,6 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             full_q_actual_seq, full_kv_actual_seq, full_kv_block_table = self._flatten_fused_overlap_mtp_to_token_batch(
                 attn_metadata,
                 num_tokens=num_tokens,
-                num_reqs=num_reqs,
                 full_q_actual_seq=full_q_actual_seq,
                 full_kv_actual_seq=full_kv_actual_seq,
                 full_kv_block_table=full_kv_block_table,
@@ -1071,15 +1094,13 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
 
         token_to_req = attn_metadata.token_to_req[:num_decode_tokens]
         row_to_req = token_to_req.to(dtype=torch.int64)
-        decode_seq_lens = torch.index_select(
-            actual_seq_lengths_key[:num_decodes],
-            0,
-            row_to_req,
-        )
         decode_cum_query_lens = actual_seq_lengths_query[:num_decodes]
-        decode_query_lens = decode_cum_query_lens.clone()
-        if num_decodes > 1:
-            decode_query_lens[1:] -= decode_cum_query_lens[:-1]
+        decode_seq_lens, decode_query_lens = self._compute_decode_token_lengths(
+            row_to_req,
+            decode_cum_query_lens,
+            actual_seq_lengths_key[:num_decodes],
+            num_decode_tokens,
+        )
         # Only the query span can be rewritten by the next MTP step.
         stable_prefix_lens = (actual_seq_lengths_key[:num_decodes] - decode_query_lens).clamp_min_(0)
         decode_stable_prefix_lens = torch.index_select(

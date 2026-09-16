@@ -148,6 +148,36 @@ def test_resident_seq_lens_use_actual_decode_lengths_instead_of_capacity():
     )
 
 
+@pytest.mark.parametrize(
+    ("token_to_req", "cumulative_query_lens", "request_kv_lens", "expected_token_lens"),
+    [
+        ([0, 1], [1, 2], [5, 9], [5, 9]),
+        ([0, 0, 0], [3], [103], [101, 102, 103]),
+        ([0, 0, 1, 1, 1], [2, 5], [12, 23], [11, 12, 21, 22, 23]),
+    ],
+    ids=["single-token-requests", "three-token-mtp", "mixed-mtp-widths"],
+)
+def test_decode_token_lengths_preserve_per_token_causality(
+    token_to_req,
+    cumulative_query_lens,
+    request_kv_lens,
+    expected_token_lens,
+):
+    token_lens, query_lens = AscendSFAKVOffloadImpl._compute_decode_token_lengths(
+        torch.tensor(token_to_req, dtype=torch.int32),
+        torch.tensor(cumulative_query_lens, dtype=torch.int32),
+        torch.tensor(request_kv_lens, dtype=torch.int32),
+        len(token_to_req),
+    )
+
+    torch.testing.assert_close(token_lens, torch.tensor(expected_token_lens, dtype=torch.int32))
+    expected_query_lens = torch.diff(
+        torch.tensor(cumulative_query_lens, dtype=torch.int32),
+        prepend=torch.zeros(1, dtype=torch.int32),
+    )
+    torch.testing.assert_close(query_lens, expected_query_lens)
+
+
 def _make_fused_overlap_impl() -> AscendSFAKVOffloadImpl:
     impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
     impl.block_size = 4
