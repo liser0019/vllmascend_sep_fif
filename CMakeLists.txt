@@ -92,9 +92,8 @@ else()
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp)
 endif()
 
-# The sparse KV LRU planner is a host-side OpenMP implementation.  A3 and A5
-# use the same planner; the device-specific host-memory mapping is handled by
-# MemFabric at runtime.
+# A3 keeps the host-side OpenMP sparse-KV planner. A5 uses the SIMT planner,
+# while the host implementation remains linked for A3 packages and utilities.
 if(SOC_VERSION MATCHES "ascend910_93.*|ascend950.*")
   find_package(OpenMP REQUIRED)
 endif()

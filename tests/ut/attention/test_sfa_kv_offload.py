@@ -148,6 +148,31 @@ def test_resident_seq_lens_use_actual_decode_lengths_instead_of_capacity():
     )
 
 
+def test_simt_resident_seq_lens_are_updated_once_for_reused_layers():
+    manager = SimpleNamespace(
+        uses_simt_lru=True,
+        mtp_layer_id=-1,
+        resident_seq_lens_npu=torch.full((4,), 4096, dtype=torch.int32),
+        _get_offload_layer_id=lambda layer_name: int(layer_name.rsplit(".", 1)[1]),
+    )
+
+    AscendSFAKVOffloadImpl._update_resident_seq_lens(
+        manager,
+        torch.tensor([5, 9], dtype=torch.int32),
+        "layer.0",
+    )
+    AscendSFAKVOffloadImpl._update_resident_seq_lens(
+        manager,
+        torch.tensor([20, 30], dtype=torch.int32),
+        "layer.1",
+    )
+
+    torch.testing.assert_close(
+        manager.resident_seq_lens_npu,
+        torch.tensor([5, 9, 4096, 4096], dtype=torch.int32),
+    )
+
+
 @pytest.mark.parametrize(
     ("token_to_req", "cumulative_query_lens", "request_kv_lens", "expected_token_lens"),
     [

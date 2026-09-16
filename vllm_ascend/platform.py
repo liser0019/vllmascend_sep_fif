@@ -45,6 +45,7 @@ from vllm_ascend.utils import (
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
     FP8_METHOD,
+    AscendDeviceType,
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
@@ -53,6 +54,7 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
+    get_ascend_device_type,
 )
 
 if TYPE_CHECKING:
@@ -1196,6 +1198,27 @@ def _setup_compile_backend(
                 "vllm::dsa_forward",
             ]
         )
+        sparse_kv_config = get_ascend_config().sparse_kv_offload_config
+        if sparse_kv_config.enabled and get_ascend_device_type() == AscendDeviceType.A5:
+            if envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:
+                logger.warning_once(
+                    "Atlas A5 sparse KV offload cannot capture mla_forward with breakable "
+                    "CUDAGraph enabled; set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to capture the "
+                    "SIMT Plan and Transfer path."
+                )
+            elif vllm_config.speculative_config is not None:
+                logger.warning_once(
+                    "Atlas A5 sparse KV offload keeps mla_forward as a graph split while "
+                    "speculative decoding is enabled because MTP changes skip_topk at runtime."
+                )
+            else:
+                compilation_config.splitting_ops = [
+                    op for op in compilation_config.splitting_ops if op != "vllm::mla_forward"
+                ]
+                logger.info_once(
+                    "Atlas A5 sparse KV offload keeps mla_forward inside the PIECEWISE graph; "
+                    "LRU Plan and Transfer use capture-safe NPU state."
+                )
         # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
         if get_current_hardware_profile().supports(HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES):
             _prune_reduced_capture_sizes(vllm_config)

@@ -635,6 +635,76 @@ class TestNPUPlatform(TestBase):
                     vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
 
+    def test_a5_simt_sparse_kv_keeps_mla_inside_piecewise_graph(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        compilation_config = vllm_config.compilation_config
+        compilation_config.mode = CompilationMode.VLLM_COMPILE
+        compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        compilation_config.splitting_ops = []
+        compilation_config.cudagraph_capture_sizes = [1, 2]
+        vllm_config.additional_config = {
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+                "enable_super_kernel": True,
+            }
+        }
+        vllm_config.model_config.enforce_eager = False
+        vllm_config._set_cudagraph_sizes = MagicMock()
+        ascend_config = SimpleNamespace(
+            sparse_kv_offload_config=SimpleNamespace(enabled=True),
+        )
+
+        with (
+            patch("vllm_ascend.platform.enable_sp", return_value=False),
+            patch("vllm_ascend.platform.get_ascend_config", return_value=ascend_config),
+            patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A5),
+            patch("vllm_ascend.platform.envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH", False),
+            patch(
+                "vllm_ascend.platform.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+        ):
+            _setup_compile_backend(vllm_config, compile_backend="test_backend")
+
+        self.assertNotIn("vllm::mla_forward", compilation_config.splitting_ops)
+        self.assertIn("vllm::dsa_forward", compilation_config.splitting_ops)
+
+    def test_a5_simt_sparse_kv_keeps_mtp_mla_as_piecewise_split(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        compilation_config = vllm_config.compilation_config
+        compilation_config.mode = CompilationMode.VLLM_COMPILE
+        compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        compilation_config.splitting_ops = []
+        compilation_config.cudagraph_capture_sizes = [1, 2]
+        vllm_config.additional_config = {
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+                "enable_super_kernel": True,
+            }
+        }
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=1)
+        vllm_config._set_cudagraph_sizes = MagicMock()
+        ascend_config = SimpleNamespace(
+            sparse_kv_offload_config=SimpleNamespace(enabled=True),
+        )
+
+        with (
+            patch("vllm_ascend.platform.enable_sp", return_value=False),
+            patch("vllm_ascend.platform.get_ascend_config", return_value=ascend_config),
+            patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A5),
+            patch("vllm_ascend.platform.envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH", False),
+            patch(
+                "vllm_ascend.platform.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+        ):
+            _setup_compile_backend(vllm_config, compile_backend="test_backend")
+
+        self.assertIn("vllm::mla_forward", compilation_config.splitting_ops)
+
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))
 

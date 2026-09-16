@@ -114,6 +114,27 @@ void device_print_tensor_meta(const at::Tensor& tensor)
     (void)tensor;
 }
 
+#ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
+void npu_sparse_kv_plan_transfer_meta(
+    const at::Tensor &, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &, const at::Tensor &, const at::Tensor &,
+    int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)
+{
+}
+
+void npu_sparse_kv_transfer_meta(
+    const at::Tensor &, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &, const at::Tensor &, const at::Tensor &,
+    int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)
+{
+}
+#endif
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale, const at::Tensor &x_scale,
     const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset,
@@ -2190,6 +2211,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_flash_mla", &vllm_ascend::meta::npu_sparse_flash_mla_meta);
     ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
     ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
+#ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
+    ops.impl("npu_sparse_kv_plan_transfer",
+             &vllm_ascend::meta::npu_sparse_kv_plan_transfer_meta);
+    ops.impl("npu_sparse_kv_transfer",
+             &vllm_ascend::meta::npu_sparse_kv_transfer_meta);
+#endif
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
     ops.impl("npu_msa_index_score", &vllm_ascend::meta::npu_msa_index_score_meta);

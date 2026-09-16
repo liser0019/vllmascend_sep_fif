@@ -435,6 +435,102 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         self.assertEqual(manager.dvas_v_bases, [0xB000])
         self.assertEqual(manager.cpu_block_lens, [(20, 10)])
 
+    def test_a5_simt_onload_plans_once_then_reuses_misses_for_next_layer(self):
+        manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+        manager.max_num_topk_rows = 4
+        manager.mtp_layer_id = -1
+        manager.topk_buffers_k = ["resident_k_0", "resident_k_1"]
+        manager.topk_buffers_v = ["resident_v_0", "resident_v_1"]
+        manager.simt_lru = MagicMock()
+        manager._get_offload_layer_id = MagicMock(return_value=0)
+
+        manager._onload_topk_kv_simt(
+            "layer.0",
+            2,
+            1,
+            "block_table",
+            "topk_indices",
+            "current_slots",
+            "req_ids",
+            "stable_prefix_lens",
+            "visible_seq_lens",
+            "token_to_req",
+        )
+
+        manager.simt_lru.set_active_rows.assert_called_once_with(2)
+        manager.simt_lru.plan_and_transfer.assert_called_once_with(
+            layer_id=0,
+            req_ids="req_ids",
+            topk_indices="topk_indices",
+            stable_prefix_lens="stable_prefix_lens",
+            visible_seq_lens="visible_seq_lens",
+            token_to_req="token_to_req",
+            block_table="block_table",
+            resident_k="resident_k_0",
+            resident_v="resident_v_0",
+        )
+
+        manager._get_offload_layer_id.return_value = 1
+        manager._onload_topk_kv_simt(
+            "layer.1",
+            2,
+            1,
+            "block_table",
+            "ignored_topk",
+            "current_slots",
+            "ignored_req_ids",
+            "ignored_stable_prefix_lens",
+            "ignored_visible_seq_lens",
+            "token_to_req",
+            skip_topk=True,
+        )
+
+        manager.simt_lru.set_active_rows.assert_called_once_with(2)
+        manager.simt_lru.transfer_reused_plan.assert_called_once_with(
+            layer_id=1,
+            token_to_req="token_to_req",
+            block_table="block_table",
+            resident_k="resident_k_1",
+            resident_v="resident_v_1",
+        )
+
+    def test_a5_simt_mtp_skip_topk_replans_compacted_rows(self):
+        manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+        manager.max_num_topk_rows = 4
+        manager.mtp_layer_id = 2
+        manager.topk_buffers_k = ["resident_k_0", "resident_k_1", "resident_k_2"]
+        manager.topk_buffers_v = ["resident_v_0", "resident_v_1", "resident_v_2"]
+        manager.simt_lru = MagicMock()
+        manager._get_offload_layer_id = MagicMock(return_value=2)
+
+        manager._onload_topk_kv_simt(
+            "mtp.layer.2",
+            3,
+            1,
+            "block_table",
+            "compacted_topk",
+            "current_slots",
+            "req_ids",
+            "stable_prefix_lens",
+            "visible_seq_lens",
+            "token_to_req",
+            skip_topk=True,
+        )
+
+        manager.simt_lru.set_active_rows.assert_called_once_with(3)
+        manager.simt_lru.transfer_reused_plan.assert_not_called()
+        manager.simt_lru.plan_and_transfer.assert_called_once_with(
+            layer_id=2,
+            req_ids="req_ids",
+            topk_indices="compacted_topk",
+            stable_prefix_lens="stable_prefix_lens",
+            visible_seq_lens="visible_seq_lens",
+            token_to_req="token_to_req",
+            block_table="block_table",
+            resident_k="resident_k_2",
+            resident_v="resident_v_2",
+        )
+
     def test_manager_rejects_pool_larger_than_dram_limit(self):
         vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
         offload_backend = SimpleNamespace(

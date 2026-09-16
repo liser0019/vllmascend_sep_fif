@@ -264,7 +264,15 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         )
 
     @staticmethod
-    def _update_resident_seq_lens(manager, decode_seq_lens: torch.Tensor) -> None:
+    def _update_resident_seq_lens(
+        manager,
+        decode_seq_lens: torch.Tensor,
+        layer_name: str | None = None,
+    ) -> None:
+        if layer_name is not None and manager.uses_simt_lru:
+            layer_id = manager._get_offload_layer_id(layer_name)
+            if layer_id not in (0, manager.mtp_layer_id):
+                return
         resident_seq_lens = manager.resident_seq_lens_npu
         source = decode_seq_lens
         if source.device != resident_seq_lens.device or source.dtype != resident_seq_lens.dtype:
@@ -1101,33 +1109,46 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             actual_seq_lengths_key[:num_decodes],
             num_decode_tokens,
         )
-        # Only the query span can be rewritten by the next MTP step.
-        stable_prefix_lens = (actual_seq_lengths_key[:num_decodes] - decode_query_lens).clamp_min_(0)
-        decode_stable_prefix_lens = torch.index_select(
-            stable_prefix_lens,
-            0,
-            row_to_req,
-        )
+        layer_id = manager._get_offload_layer_id(layer_name)
+        # MTP can reuse Indexer output only after compacting its rows.  It
+        # therefore still needs a device Plan for the new row mapping.
+        reuse_simt_plan = manager.uses_simt_lru and self.skip_topk and layer_id != manager.mtp_layer_id
+        run_lru_plan = not self.skip_topk or (manager.uses_simt_lru and not reuse_simt_plan)
+        if not run_lru_plan:
+            decode_stable_prefix_lens = decode_seq_lens
+        else:
+            # Only the query span can be rewritten by the next MTP step.
+            stable_prefix_lens = (actual_seq_lengths_key[:num_decodes] - decode_query_lens).clamp_min_(0)
+            decode_stable_prefix_lens = torch.index_select(
+                stable_prefix_lens,
+                0,
+                row_to_req,
+            )
         decode_topk = topk_indices[:num_decode_tokens]
-        seq_len_thresholds = decode_seq_lens.view(
-            decode_seq_lens.shape[0],
-            *([1] * (decode_topk.ndim - 1)),
-        )
-        valid_topk = build_valid_topk_mask(decode_topk, seq_len_thresholds)
-        decode_topk = torch.where(
-            valid_topk,
-            decode_topk,
-            torch.full_like(decode_topk, -1),
-        )
-        if decode_topk.ndim == 3 and decode_topk.shape[1] == 1:
-            decode_topk = decode_topk.squeeze(1)
-        if decode_topk.ndim != 2:
-            raise ValueError("Sparse KV offload top-k must have [tokens, topk] shape")
+        if run_lru_plan:
+            if decode_topk.ndim == 3 and decode_topk.shape[1] == 1:
+                decode_topk = decode_topk.squeeze(1)
+            if decode_topk.ndim != 2:
+                raise ValueError("Sparse KV offload top-k must have [tokens, topk] shape")
+            if manager.uses_simt_lru:
+                if decode_topk.dtype != torch.int32 or not decode_topk.is_contiguous():
+                    raise ValueError(
+                        "Sparse KV SIMT requires contiguous int32 Indexer output, "
+                        f"got dtype={decode_topk.dtype}, contiguous={decode_topk.is_contiguous()}"
+                    )
+            else:
+                seq_len_thresholds = decode_seq_lens.view(decode_seq_lens.shape[0], 1)
+                valid_topk = build_valid_topk_mask(decode_topk, seq_len_thresholds)
+                decode_topk = torch.where(
+                    valid_topk,
+                    decode_topk,
+                    torch.full_like(decode_topk, -1),
+                )
 
         # SFA needs the real visible KV length for every resident row. The
         # resident buffer capacity is only a storage limit, not a sequence
         # length; using it here corrupts position and causal-mask semantics.
-        self._update_resident_seq_lens(manager, decode_seq_lens)
+        self._update_resident_seq_lens(manager, decode_seq_lens, layer_name)
         (
             resident_k,
             resident_v,
@@ -1136,11 +1157,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             resident_query_lens,
             resident_seq_lens,
         ) = self._resident_views(manager, layer_name, num_decode_tokens)
-        decode_req_ids = torch.index_select(
-            attn_metadata.req_ids_tensor[:num_decodes],
-            0,
-            row_to_req,
-        )
+        request_ids = attn_metadata.req_ids_tensor[:num_decodes]
+        decode_req_ids = request_ids if manager.uses_simt_lru else torch.index_select(request_ids, 0, row_to_req)
         manager.onload_topk_kv(
             layer_name,
             num_decode_tokens,
@@ -1150,6 +1168,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             resident_slot_indices,
             decode_req_ids,
             decode_stable_prefix_lens,
+            decode_seq_lens,
             token_to_req,
             capturing=self._in_graph_runtime(),
             skip_topk=self.skip_topk,

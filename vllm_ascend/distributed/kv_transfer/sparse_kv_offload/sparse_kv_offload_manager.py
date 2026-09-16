@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_simt_lru import SparseKVSimtLru
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
@@ -80,6 +81,8 @@ _SPARSE_KV_OFFLOAD_OP_NAMES = (
     "sparse_kv_compute_lru_resident_addrs",
     "sparse_kv_restore_bfloat16_tensor",
     "sparse_kv_restore_int16_tensor",
+    "npu_sparse_kv_plan_transfer",
+    "npu_sparse_kv_transfer",
 )
 
 
@@ -564,6 +567,7 @@ class SparseKVOffloadManager:
         self.use_fused_overlap = sparse_kv_offload_config.use_fused_overlap
         self.device_type = get_ascend_device_type()
         self.rank_local_host_pool = self.device_type == AscendDeviceType.A5
+        self.uses_simt_lru = self.rank_local_host_pool
 
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -847,6 +851,32 @@ class SparseKVOffloadManager:
         self.dvas_k_bases = list(self.hvas_k_bases)
         self.dvas_v_bases = list(self.hvas_v_bases)
 
+    def _initialize_simt_lru_backend(self, device: torch.device) -> None:
+        host_num_blocks = int(self.k_caches_cpu[0].shape[0])
+        for layer_id, (k_cache, v_cache) in enumerate(zip(self.k_caches_cpu, self.v_caches_cpu)):
+            if int(k_cache.shape[0]) != host_num_blocks or int(v_cache.shape[0]) != host_num_blocks:
+                raise ValueError(
+                    "Sparse KV SIMT requires the same Host block count on every layer: "
+                    f"layer={layer_id}, expected={host_num_blocks}, "
+                    f"k_blocks={k_cache.shape[0]}, v_blocks={v_cache.shape[0]}"
+                )
+        self.simt_lru = SparseKVSimtLru(
+            max_rows=self.max_num_topk_rows,
+            topk=self.topk,
+            capacity=self.topk_buffer_size,
+            max_token=self.max_model_len,
+            block_size=self.block_size,
+            host_num_blocks=host_num_blocks,
+            token_size_bytes_k=self.token_size_bytes_k,
+            token_size_bytes_v=self.token_size_bytes_v,
+            host_k_bases=self.dvas_k_bases,
+            host_v_bases=self.dvas_v_bases,
+            current_slots=self.current_slots_npu,
+            device=device,
+        )
+        self._onload_topk_kv_impl = self._onload_topk_kv_simt
+        logger.info_once("Sparse KV offload uses the Atlas A5 NPU SIMT LRU planner with persistent device state.")
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -935,6 +965,10 @@ class SparseKVOffloadManager:
         self.addr_k_bases: list[int] = [t.data_ptr() for t in self.topk_buffers_k]
         self.addr_v_bases: list[int] = [t.data_ptr() for t in self.topk_buffers_v]
         self._initialize_pool_address_tables()
+        if self.rank_local_host_pool:
+            self._initialize_simt_lru_backend(device)
+            return
+        self._onload_topk_kv_impl = self._onload_topk_kv_cpu_backend
 
         gvas_buffer_offset = 0
         gvas_buffer_size_bytes = self.max_num_topk_rows * self.topk * 2 * 8  # 2: k+v, 8: int64
@@ -1303,10 +1337,96 @@ class SparseKVOffloadManager:
         current_slots_npu: torch.Tensor,
         req_ids_npu: torch.Tensor,
         stable_prefix_lens_npu: torch.Tensor,
+        visible_seq_lens_npu: torch.Tensor,
         token_to_req_npu: torch.Tensor | None = None,
         capturing: bool = False,
         skip_topk: bool = False,
     ):
+        return self._onload_topk_kv_impl(
+            layer_name,
+            num_tokens,
+            num_reqs,
+            block_table,
+            topk_indices_npu,
+            current_slots_npu,
+            req_ids_npu,
+            stable_prefix_lens_npu,
+            visible_seq_lens_npu,
+            token_to_req_npu,
+            capturing,
+            skip_topk,
+        )
+
+    def _onload_topk_kv_simt(
+        self,
+        layer_name: str,
+        num_tokens: int,
+        num_reqs: int,
+        block_table: torch.Tensor,
+        topk_indices_npu: torch.Tensor,
+        current_slots_npu: torch.Tensor,
+        req_ids_npu: torch.Tensor,
+        stable_prefix_lens_npu: torch.Tensor,
+        visible_seq_lens_npu: torch.Tensor,
+        token_to_req_npu: torch.Tensor | None = None,
+        capturing: bool = False,
+        skip_topk: bool = False,
+    ) -> None:
+        del num_reqs, current_slots_npu, capturing
+        if token_to_req_npu is None:
+            raise ValueError("Sparse KV SIMT requires token_to_req metadata")
+        layer_id = self._get_offload_layer_id(layer_name)
+        if num_tokens > self.max_num_topk_rows:
+            raise ValueError(
+                "Sparse KV offload topk rows exceed configured workspace, "
+                f"num_tokens={num_tokens}, max_num_topk_rows={self.max_num_topk_rows}"
+            )
+        if layer_id in (0, self.mtp_layer_id):
+            self.simt_lru.set_active_rows(num_tokens)
+        # Backbone skip layers keep the same row mapping and mirror the Plan
+        # owner's resident slots, so only their layer-specific payload needs
+        # copying. MTP compacts TopK rows between draft steps; those rows must
+        # be planned again even though the Indexer result itself is reused.
+        reuse_previous_plan = skip_topk and layer_id != self.mtp_layer_id
+        if reuse_previous_plan:
+            if layer_id == 0:
+                raise ValueError("Sparse KV SIMT cannot reuse TopK on the first offload layer")
+            self.simt_lru.transfer_reused_plan(
+                layer_id=layer_id,
+                token_to_req=token_to_req_npu,
+                block_table=block_table,
+                resident_k=self.topk_buffers_k[layer_id],
+                resident_v=self.topk_buffers_v[layer_id],
+            )
+            return
+        self.simt_lru.plan_and_transfer(
+            layer_id=layer_id,
+            req_ids=req_ids_npu,
+            topk_indices=topk_indices_npu,
+            stable_prefix_lens=stable_prefix_lens_npu,
+            visible_seq_lens=visible_seq_lens_npu,
+            token_to_req=token_to_req_npu,
+            block_table=block_table,
+            resident_k=self.topk_buffers_k[layer_id],
+            resident_v=self.topk_buffers_v[layer_id],
+        )
+
+    def _onload_topk_kv_cpu_backend(
+        self,
+        layer_name: str,
+        num_tokens: int,
+        num_reqs: int,
+        block_table: torch.Tensor,
+        topk_indices_npu: torch.Tensor,
+        current_slots_npu: torch.Tensor,
+        req_ids_npu: torch.Tensor,
+        stable_prefix_lens_npu: torch.Tensor,
+        visible_seq_lens_npu: torch.Tensor,
+        token_to_req_npu: torch.Tensor | None = None,
+        capturing: bool = False,
+        skip_topk: bool = False,
+    ):
+        del visible_seq_lens_npu
         layer_id = self._get_offload_layer_id(layer_name)
         if num_tokens > self.max_num_topk_rows:
             raise ValueError(

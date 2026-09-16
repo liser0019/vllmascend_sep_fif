@@ -54,6 +54,7 @@
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
+#include "attention/sparse_kv_plan/sparse_kv_lru_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
@@ -2991,6 +2992,29 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("swap_blocks_batch", torch::kCPU, &vllm_ascend::swap_blocks_batch);
 
 #ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
+    ops.def(
+        "npu_sparse_kv_plan_transfer("
+        "Tensor req_ids, Tensor topk_indices, Tensor stable_prefix_lens, "
+        "Tensor visible_seq_lens, Tensor token_to_req, Tensor block_table, "
+        "Tensor active_rows, Tensor(a!) last_req_ids, Tensor(b!) slot_to_token, "
+        "Tensor(c!) lru_slots, Tensor(d!) current_slots, Tensor(e!) miss_count, "
+        "Tensor(f!) miss_tokens, Tensor(g!) miss_slots, Tensor(h!) compact_workspace, "
+        "Tensor host_cache_bases, Tensor(i!) resident_k, Tensor(j!) resident_v, "
+        "int topk, int capacity, int max_token, int block_size, int host_num_blocks, "
+        "int token_size_bytes_k, int token_size_bytes_v) -> ()");
+    ops.impl("npu_sparse_kv_plan_transfer", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_kv_plan_transfer);
+
+    ops.def(
+        "npu_sparse_kv_transfer("
+        "Tensor miss_count, Tensor miss_tokens, Tensor miss_slots, "
+        "Tensor token_to_req, Tensor block_table, Tensor host_cache_bases, "
+        "Tensor active_rows, Tensor(a!) resident_k, Tensor(b!) resident_v, "
+        "int topk, int capacity, int block_size, int host_num_blocks, "
+        "int token_size_bytes_k, int token_size_bytes_v) -> ()");
+    ops.impl("npu_sparse_kv_transfer", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_kv_transfer);
+
     ops.def("sparse_kv_warmup_lru_resident_threads(int requested_threads) -> int");
     ops.impl("sparse_kv_warmup_lru_resident_threads", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::warmup_lru_resident_threads);
