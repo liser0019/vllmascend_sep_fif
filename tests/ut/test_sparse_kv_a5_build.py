@@ -41,3 +41,21 @@ def test_sparse_kv_a5_sources_use_cann_91_interfaces():
     assert transfer_tiling.count("const gert::StorageShape*") == 2
     assert 'extern "C" __global__ __aicore__ void sparse_kv_plan' in plan_kernel
     assert "KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);" in plan_kernel
+
+
+def test_cann_build_links_opsbase_and_stages_quant_indexer_dependency():
+    custom_build = (_REPO_ROOT / "csrc/cmake/custom_build.cmake").read_text(encoding="utf-8")
+    quant_cmake = (
+        _REPO_ROOT / "csrc/attention/quant_lightning_indexer_v2/op_host/CMakeLists.txt"
+    ).read_text(encoding="utf-8")
+    package_branch = re.search(
+        r"if\(BUILD_WITH_3_8_PACKAGE\)\s+target_link_libraries\(\s+cust_opmaster(?P<body>.*?)\n\)",
+        custom_build,
+        re.DOTALL,
+    )
+
+    assert package_branch is not None
+    assert "$<$<TARGET_EXISTS:opsbase>:opsbase>" in package_branch.group("body")
+    assert '"attention/lightning_indexer_v2"' in quant_cmake
+    assert "CACHE STRING" in quant_cmake
+    assert "FORCE" in quant_cmake
