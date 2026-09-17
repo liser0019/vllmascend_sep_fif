@@ -454,13 +454,14 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(PLAN_THREADS) inline void SparseKvPlanRuntim
 
 }  // namespace
 
-extern "C" __global__ __vector__ void sparse_kv_plan(GM_ADDR reqIds, GM_ADDR topkIndices, GM_ADDR stablePrefixLens,
+extern "C" __global__ __aicore__ void sparse_kv_plan(GM_ADDR reqIds, GM_ADDR topkIndices, GM_ADDR stablePrefixLens,
                                                      GM_ADDR visibleSeqLens, GM_ADDR tokenToReq, GM_ADDR blockTable,
                                                      GM_ADDR activeRows, GM_ADDR lastReqIds, GM_ADDR slotToToken,
                                                      GM_ADDR lruSlots, GM_ADDR currentSlots, GM_ADDR missCount,
                                                      GM_ADDR missTokens, GM_ADDR missSlots, GM_ADDR compactWorkspace,
                                                      GM_ADDR workspace, GM_ADDR tiling) {
   (void)workspace;
+  KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
   AscendC::InitSocState();
   REGISTER_TILING_DEFAULT(SparseKvPlanTilingData);
   GET_TILING_DATA_WITH_STRUCT(SparseKvPlanTilingData, tilingData, tiling);

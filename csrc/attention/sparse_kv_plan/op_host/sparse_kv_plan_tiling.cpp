@@ -35,9 +35,9 @@ ge::graphStatus Fail(gert::TilingContext* context, const char* message) {
 }  // namespace
 
 static ge::graphStatus SparseKvPlanTiling(gert::TilingContext* context) {
-  const gert::Shape* reqShape = context->GetInputShape(0);
-  const gert::Shape* topkShape = context->GetInputShape(1);
-  const gert::Shape* blockTableShape = context->GetInputShape(5);
+  const gert::StorageShape* reqShape = context->GetInputShape(0);
+  const gert::StorageShape* topkShape = context->GetInputShape(1);
+  const gert::StorageShape* blockTableShape = context->GetInputShape(5);
   const auto* attrs = context->GetAttrs();
   if (reqShape == nullptr || topkShape == nullptr || blockTableShape == nullptr || attrs == nullptr) {
     return Fail(context, "SparseKvPlan requires shapes and attributes");

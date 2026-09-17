@@ -23,8 +23,8 @@ ge::graphStatus Fail(gert::TilingContext* context, const char* message) {
 }  // namespace
 
 static ge::graphStatus SparseKvTransferTiling(gert::TilingContext* context) {
-  const gert::Shape* missShape = context->GetInputShape(0);
-  const gert::Shape* blockTableShape = context->GetInputShape(4);
+  const gert::StorageShape* missShape = context->GetInputShape(0);
+  const gert::StorageShape* blockTableShape = context->GetInputShape(4);
   const auto* attrs = context->GetAttrs();
   if (missShape == nullptr || blockTableShape == nullptr || attrs == nullptr) {
     return Fail(context, "SparseKvTransfer requires shapes and attributes");
