@@ -406,6 +406,13 @@ function(add_ops_src_copy)
         file(GLOB SRC_FILES ${SRC_COPY_SRC}/*)
     endif()
     list(FILTER SRC_FILES EXCLUDE REGEX "op_host")
+    file(
+        GLOB_RECURSE SRC_COPY_DEP_FILES
+        CONFIGURE_DEPENDS
+        LIST_DIRECTORIES false
+        "${SRC_COPY_SRC}/*"
+    )
+    list(FILTER SRC_COPY_DEP_FILES EXCLUDE REGEX "/op_host/")
 
     get_filename_component(PARENT_PTH "${SRC_COPY_SRC}" DIRECTORY)
     get_filename_component(CUR_NAME "${SRC_COPY_SRC}" NAME)
@@ -424,12 +431,14 @@ function(add_ops_src_copy)
                     COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
                     COMMAND rm -rf ${SRC_COPY_DST}/op_kernel/
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS ${SRC_COPY_DEP_FILES}
             )
         else()
             add_custom_command(OUTPUT ${_BUILD_FLAG}
                     COMMAND mkdir -p ${SRC_COPY_DST}
                     COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS ${SRC_COPY_DEP_FILES}
             )
         endif()
 
@@ -470,6 +479,7 @@ function(add_bin_compile_target)
     endforeach()
 
     set(_ops_target_list)
+    set(_selected_op_dirs)
     set(compile_scripts)
     file(GLOB scripts_list ${GEN_OUT_DIR}/*.sh)
     list(APPEND compile_scripts ${scripts_list})
@@ -606,6 +616,7 @@ function(add_bin_compile_target)
         endif ()
 
         if (_compile_flag)
+            list(APPEND _selected_op_dirs ${op_file})
             set(_BUILD_COMMAND)
             set(_BUILD_FLAG ${GEN_OUT_DIR}/${OP_TARGET_NAME}_${op_index}.done)
             if (ENABLE_OPS_HOST OR ENABLE_HOST_TILING)
@@ -637,7 +648,8 @@ function(add_bin_compile_target)
         endif ()
     endforeach()
 
-    if (_ops_target_list)
+    list(REMOVE_DUPLICATES _selected_op_dirs)
+    if (_selected_op_dirs)
         set(OPS_CONFIG_TARGET ops_config_${BINARY_COMPUTE_UNIT})
         set(BINARY_INFO_CONFIG_FILE ${BIN_OUT_DIR}/binary_info_config.json)
         set(RELOCATABLE_KERNEL_INFO_CONFIG_FILE ${BIN_OUT_DIR}/relocatable_kernel_info_config.json)
@@ -645,6 +657,7 @@ function(add_bin_compile_target)
         add_custom_target(${OPS_CONFIG_TARGET}
                 COMMAND ${HI_PYTHON} ${ASCENDC_CMAKE_UTIL_DIR}/ascendc_ops_config.py
                         -p ${BIN_OUT_DIR} -s ${BINARY_COMPUTE_UNIT}
+                        --selected-ops ${_selected_op_dirs}
                 BYPRODUCTS ${BINARY_INFO_CONFIG_FILE} ${RELOCATABLE_KERNEL_INFO_CONFIG_FILE}
         )
 

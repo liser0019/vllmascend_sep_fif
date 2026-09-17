@@ -234,13 +234,26 @@ def gen_ops_config(json_file, soc, binary_info_config, config):
     add_op_config(op_file, bin_info, config)
 
 
-def check_single_op_is_void(root_dir):
-    for root, dirs, _ in os.walk(root_dir):
-        for sub_dir in dirs:
-            dir_path = os.path.join(root, sub_dir)
-            if len(os.listdir(dir_path)) == 0:
-                print(f"[ERROR] op {sub_dir}: not any obj compile success")
-                sys.exit(1)
+def get_selected_op_dirs(root_dir, selected_ops=None):
+    if selected_ops is None:
+        return [entry.path for entry in os.scandir(root_dir) if entry.is_dir()]
+    return [os.path.join(root_dir, op_name) for op_name in selected_ops]
+
+
+def get_selected_suffix_files(root_dir, suffix, selected_ops=None):
+    if selected_ops is None:
+        return get_specified_suffix_file(root_dir, suffix)
+    files = []
+    for op_dir in get_selected_op_dirs(root_dir, selected_ops):
+        files.extend(get_specified_suffix_file(op_dir, suffix))
+    return sorted(files)
+
+
+def check_single_op_is_void(root_dir, selected_ops=None):
+    for op_dir in get_selected_op_dirs(root_dir, selected_ops):
+        if not os.path.isdir(op_dir) or not get_specified_suffix_file(op_dir, ".json"):
+            print(f"[ERROR] op {os.path.basename(op_dir)}: not any obj compile success")
+            sys.exit(1)
 
 
 def write_jsons(out_dir, file_list, config):
@@ -272,11 +285,11 @@ def generate_operator_cfg_file(json_files, binary_info_config, soc, out_dir, gen
     write_jsons(out_dir, file_list, config)
 
 
-def gen_all_config(root_dir, soc, out_dir, skip_binary_info_config, op_range="all"):
+def gen_all_config(root_dir, soc, out_dir, skip_binary_info_config, op_range="all", selected_ops=None):
     if op_range != "relocatable":
-        check_single_op_is_void(root_dir)
-    all_json_files = get_specified_suffix_file(root_dir, ".json")
-    relocatable_json_files = get_specified_suffix_file(root_dir, "_relocatable.json")
+        check_single_op_is_void(root_dir, selected_ops)
+    all_json_files = get_selected_suffix_files(root_dir, ".json", selected_ops)
+    relocatable_json_files = get_selected_suffix_files(root_dir, "_relocatable.json", selected_ops)
     normal_json_files = list(set(all_json_files) - set(relocatable_json_files))
     os.makedirs(out_dir, exist_ok=True)
 
@@ -343,6 +356,12 @@ def args_prase():
         help="all operators/normal operators/relocatable operators.",
     )
 
+    parser.add_argument(
+        "--selected-ops",
+        nargs="+",
+        help="Only validate and generate configuration for these operator directories.",
+    )
+
     return parser.parse_args()
 
 
@@ -353,7 +372,14 @@ def main():
     else:
         out_dir = args.out
 
-    gen_all_config(args.path, args.soc, out_dir, args.skip_binary_info_config, args.op_range)
+    gen_all_config(
+        args.path,
+        args.soc,
+        out_dir,
+        args.skip_binary_info_config,
+        args.op_range,
+        args.selected_ops,
+    )
 
 
 if __name__ == "__main__":
