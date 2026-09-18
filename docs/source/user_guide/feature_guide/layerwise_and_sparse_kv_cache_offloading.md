@@ -142,6 +142,42 @@ in sections 2 and 3.
     If the image provides a specific Clang version, install the matching OpenMP
     package, for example `libomp-17-dev` for Clang 17.
 
+=== "A5 series"
+
+    Build custom operators with a temporary directory that has enough free
+    space and permits executing files. In particular, do not use `/dev/shm`
+    when it is mounted with `noexec`, because the generated `.run` installer
+    executes its embedded `install.sh` from `TMPDIR`.
+
+    ```bash
+    mkdir -p "$HOME/.cache/vllm-ascend/install-tmp"
+    export TMPDIR="$HOME/.cache/vllm-ascend/install-tmp"
+    export TMP="$TMPDIR"
+    export TEMP="$TMPDIR"
+    export COMPILE_CUSTOM_KERNELS=1
+    export SOC_VERSION=ascend950pr_957b
+    python -m pip install -e . --no-build-isolation --no-deps
+    ```
+
+    Install the MemFabric A5 AccOffload kernel in every Python environment
+    used by a Decode worker. Installing the wheel alone may leave the packaged
+    placeholder library in place.
+
+    ```bash
+    mfcli kernel install --soc-version A5
+    ACCOFFLOAD_SO="$(python -c '
+    from pathlib import Path
+    import memfabric_hybrid
+    print(Path(memfabric_hybrid.__file__).parent / "lib/libmf_hybm_accoffload.so")
+    ')"
+    test -s "$ACCOFFLOAD_SO"
+    file "$ACCOFFLOAD_SO" | grep -q "ELF 64-bit"
+    ```
+
+    Run `mfcli` from the same virtual environment as vLLM. If the final two
+    checks fail, repeat the kernel installation in that environment instead of
+    copying a shared library from another environment.
+
 ## 2. Layerwise KV Cache Offload on Prefill
 
 Use this mode on a dedicated Prefill node with:
