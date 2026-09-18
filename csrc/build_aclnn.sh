@@ -227,9 +227,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "causal_conv1d"
         "recurrent_gated_delta_rule"
         "recurrent_kda"
-        "chunk_fwd_o"
-        "chunk_gated_delta_rule_fwd_h"
-        "chunk_kda_fwd"
+        # These chunk kernels do not produce Ascend 950 objects yet. Keeping
+        # them out of this list prevents invalid empty operator packages.
         "kda_gate_cumsum"
         "kda_layout_swap12"
         "store_kv_block"
