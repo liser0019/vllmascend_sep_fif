@@ -15,6 +15,69 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.utils import AscendDeviceType
 
 
+class TestSparseKVCustomOpLoading(unittest.TestCase):
+    def tearDown(self):
+        manager_module._SPARSE_KV_OFFLOAD_OPS = None
+
+    @staticmethod
+    def _all_sparse_ops():
+        return SimpleNamespace(**{name: object() for name in manager_module._SPARSE_KV_OFFLOAD_OP_NAMES})
+
+    def test_a5_loads_native_extension_once_without_enabling_all_custom_ops(self):
+        sparse_ops = self._all_sparse_ops()
+        with (
+            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A5),
+            patch.object(manager_module, "bootstrap_custom_op_env") as bootstrap,
+            patch.object(manager_module, "enable_custom_op") as enable_custom_op,
+            patch.object(manager_module.importlib, "import_module") as import_module,
+            patch.object(manager_module.torch.ops, "_C_ascend", sparse_ops),
+        ):
+            self.assertIs(manager_module._sparse_kv_ops(), sparse_ops)
+            self.assertIs(manager_module._sparse_kv_ops(), sparse_ops)
+
+        bootstrap.assert_called_once_with()
+        import_module.assert_called_once_with("vllm_ascend.vllm_ascend_C")
+        enable_custom_op.assert_not_called()
+
+    def test_a5_preserves_native_extension_import_error(self):
+        import_error = ImportError("extension is unavailable")
+        with (
+            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A5),
+            patch.object(manager_module, "bootstrap_custom_op_env"),
+            patch.object(manager_module.importlib, "import_module", side_effect=import_error),
+            self.assertRaisesRegex(RuntimeError, "Failed to load A5 Sparse KV custom ops") as raised,
+        ):
+            manager_module._sparse_kv_ops()
+
+        self.assertIs(raised.exception.__cause__, import_error)
+
+    def test_a5_reports_missing_sparse_ops(self):
+        sparse_ops = SimpleNamespace(sparse_kv_restore_bfloat16_tensor=object())
+        with (
+            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A5),
+            patch.object(manager_module, "bootstrap_custom_op_env"),
+            patch.object(manager_module.importlib, "import_module"),
+            patch.object(manager_module.torch.ops, "_C_ascend", sparse_ops),
+            self.assertRaisesRegex(RuntimeError, "sparse_kv_warmup_lru_resident_threads"),
+        ):
+            manager_module._sparse_kv_ops()
+
+    def test_non_a5_uses_general_custom_op_loader(self):
+        sparse_ops = self._all_sparse_ops()
+        with (
+            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A3),
+            patch.object(manager_module, "bootstrap_custom_op_env") as bootstrap,
+            patch.object(manager_module, "enable_custom_op", return_value=True) as enable_custom_op,
+            patch.object(manager_module.importlib, "import_module") as import_module,
+            patch.object(manager_module.torch.ops, "_C_ascend", sparse_ops),
+        ):
+            self.assertIs(manager_module._sparse_kv_ops(), sparse_ops)
+
+        enable_custom_op.assert_called_once_with()
+        bootstrap.assert_not_called()
+        import_module.assert_not_called()
+
+
 class _FakeKVCacheSpec:
     def __init__(
         self,
