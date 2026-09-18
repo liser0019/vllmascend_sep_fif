@@ -237,7 +237,7 @@ def gen_ops_config(json_file, soc, binary_info_config, config):
 def get_selected_op_dirs(root_dir, selected_ops=None):
     if selected_ops is None:
         return [entry.path for entry in os.scandir(root_dir) if entry.is_dir()]
-    return [os.path.join(root_dir, op_name) for op_name in selected_ops]
+    return [op_name if os.path.isabs(op_name) else os.path.join(root_dir, op_name) for op_name in selected_ops]
 
 
 def get_selected_suffix_files(root_dir, suffix, selected_ops=None):

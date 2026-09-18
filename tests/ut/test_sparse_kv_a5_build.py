@@ -54,11 +54,13 @@ def test_sparse_kv_a5_sources_use_cann_91_interfaces():
     plan_kernel = (_REPO_ROOT / "csrc/attention/sparse_kv_plan/op_kernel/sparse_kv_plan_apt.cpp").read_text(
         encoding="utf-8"
     )
+    adapter = (_REPO_ROOT / "csrc/attention/sparse_kv_plan/sparse_kv_lru_torch_adpt.h").read_text(encoding="utf-8")
 
     assert plan_tiling.count("const gert::StorageShape*") == 3
     assert transfer_tiling.count("const gert::StorageShape*") == 2
     assert 'extern "C" __global__ __aicore__ void sparse_kv_plan' in plan_kernel
     assert "KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);" in plan_kernel
+    assert '#include "../../aclnn_torch_adapter/op_api_common.h"' in adapter
 
 
 def test_cann_build_links_opsbase_and_stages_quant_indexer_dependency():
@@ -111,3 +113,19 @@ def test_ops_config_rejects_selected_operator_without_output(tmp_path):
 
     with pytest.raises(SystemExit):
         ops_config.check_single_op_is_void(str(tmp_path), ["selected_op"])
+
+
+def test_ops_config_accepts_absolute_selected_path_and_preserves_full_check(tmp_path):
+    ops_config = _load_ops_config_module()
+    selected_dir = tmp_path / "selected_op"
+    selected_dir.mkdir()
+    selected_json = selected_dir / "kernel.json"
+    selected_json.write_text("{}", encoding="utf-8")
+    (tmp_path / "stale_empty_op").mkdir()
+
+    selected_files = ops_config.get_selected_suffix_files(str(tmp_path), ".json", [str(selected_dir)])
+    assert selected_files == [str(selected_json)]
+    ops_config.check_single_op_is_void(str(tmp_path), [str(selected_dir)])
+
+    with pytest.raises(SystemExit):
+        ops_config.check_single_op_is_void(str(tmp_path))

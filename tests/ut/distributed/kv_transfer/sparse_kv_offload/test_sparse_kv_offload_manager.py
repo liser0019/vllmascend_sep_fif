@@ -1,3 +1,4 @@
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -13,6 +14,42 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.utils import AscendDeviceType
+
+
+class TestSparseKVCustomOpLoading(unittest.TestCase):
+    def tearDown(self):
+        manager_module._SPARSE_KV_OFFLOAD_OPS = None
+
+    @staticmethod
+    def _all_sparse_ops():
+        return SimpleNamespace(**{name: object() for name in manager_module._SPARSE_KV_OFFLOAD_OP_NAMES})
+
+    def test_a5_loads_native_extension_without_enabling_all_custom_ops(self):
+        sparse_ops = self._all_sparse_ops()
+        extension = MagicMock()
+        with (
+            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A5),
+            patch.object(manager_module, "bootstrap_custom_op_env") as bootstrap,
+            patch.object(manager_module, "enable_custom_op") as enable_custom_op,
+            patch.object(manager_module.torch.ops, "_C_ascend", sparse_ops),
+            patch.dict(sys.modules, {"vllm_ascend.vllm_ascend_C": extension}),
+        ):
+            self.assertIs(manager_module._sparse_kv_ops(), sparse_ops)
+            self.assertIs(manager_module._sparse_kv_ops(), sparse_ops)
+
+        bootstrap.assert_called_once_with()
+        enable_custom_op.assert_not_called()
+
+    def test_a5_reports_missing_sparse_ops(self):
+        sparse_ops = SimpleNamespace(sparse_kv_restore_bfloat16_tensor=object())
+        with (
+            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A5),
+            patch.object(manager_module, "bootstrap_custom_op_env"),
+            patch.object(manager_module.torch.ops, "_C_ascend", sparse_ops),
+            patch.dict(sys.modules, {"vllm_ascend.vllm_ascend_C": MagicMock()}),
+            self.assertRaisesRegex(RuntimeError, "npu_sparse_kv_plan_transfer"),
+        ):
+            manager_module._sparse_kv_ops()
 
 
 class _FakeKVCacheSpec:

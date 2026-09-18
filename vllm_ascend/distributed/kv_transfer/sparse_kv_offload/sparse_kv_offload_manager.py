@@ -32,7 +32,7 @@ from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_simt_lru import SparseKVSimtLru
-from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, bootstrap_custom_op_env, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
 # [k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v].
@@ -94,7 +94,14 @@ def _sparse_kv_ops():
     global _SPARSE_KV_OFFLOAD_OPS
     if _SPARSE_KV_OFFLOAD_OPS is not None:
         return _SPARSE_KV_OFFLOAD_OPS
-    if not enable_custom_op():
+
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        try:
+            bootstrap_custom_op_env()
+            import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+        except (ImportError, OSError) as exc:
+            raise RuntimeError("Failed to load A5 Sparse KV custom ops from vllm_ascend_C.") from exc
+    elif not enable_custom_op():
         raise RuntimeError("Sparse KV offload requires custom ops to be enabled.")
 
     missing_ops = [name for name in _SPARSE_KV_OFFLOAD_OP_NAMES if not hasattr(torch.ops._C_ascend, name)]

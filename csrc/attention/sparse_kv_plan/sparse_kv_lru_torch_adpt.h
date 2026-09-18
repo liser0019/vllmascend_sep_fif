@@ -7,7 +7,7 @@
 
 #include <torch/extension.h>
 
-#include "aclnn_torch_adapter/op_api_common.h"
+#include "../../aclnn_torch_adapter/op_api_common.h"
 
 namespace vllm_ascend {
 namespace {
