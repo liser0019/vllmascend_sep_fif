@@ -54,13 +54,39 @@ def test_sparse_kv_a5_sources_use_cann_91_interfaces():
     plan_kernel = (_REPO_ROOT / "csrc/attention/sparse_kv_plan/op_kernel/sparse_kv_plan_apt.cpp").read_text(
         encoding="utf-8"
     )
+    plan_config = (_REPO_ROOT / "csrc/attention/sparse_kv_plan/op_kernel/sparse_kv_plan_config.h").read_text(
+        encoding="utf-8"
+    )
     adapter = (_REPO_ROOT / "csrc/attention/sparse_kv_plan/sparse_kv_lru_torch_adpt.h").read_text(encoding="utf-8")
 
     assert plan_tiling.count("const gert::StorageShape*") == 3
     assert transfer_tiling.count("const gert::StorageShape*") == 2
     assert 'extern "C" __global__ __aicore__ void sparse_kv_plan' in plan_kernel
     assert "KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);" in plan_kernel
+    assert "SetDynUBufSize(localMemoryBytes)" in plan_tiling
+    assert "tiling.set_localMemoryBytes(localMemoryBytes)" in plan_tiling
+    assert "PLAN_THREADS = 2048U" in plan_config
+    assert "PLAN_WARP_COUNT = PLAN_THREADS / PLAN_WARP_SIZE" in plan_config
+    assert "2U * PLAN_WARP_COUNT + PLAN_CONTROL_ELEMENTS" in plan_config
+    assert "PLAN_WARP_COUNT == 64U" not in plan_kernel
+    assert "warpIndex < PLAN_WARP_COUNT" in plan_kernel
+    assert "scanWorkspace + PLAN_SCAN_STORAGE_ELEMENTS" in plan_kernel
     assert '#include "../../aclnn_torch_adapter/op_api_common.h"' in adapter
+
+
+def test_sparse_kv_plan_dynamic_ub_size_covers_fast_and_fallback_paths():
+    threads = 2048
+    warp_count = threads // 32
+    scan_elements = 2 * warp_count + 8
+    scan_bytes = (scan_elements * 4 + 31) & ~31
+    row_ub_limit = 112 * 1024
+
+    def local_bytes(row_bytes: int) -> int:
+        aligned_row_bytes = (row_bytes + 31) & ~31
+        return scan_bytes + (aligned_row_bytes if aligned_row_bytes <= row_ub_limit else 0)
+
+    assert local_bytes(row_ub_limit) == scan_bytes + row_ub_limit
+    assert local_bytes(row_ub_limit + 1) == scan_bytes
 
 
 def test_cann_build_links_opsbase_and_stages_quant_indexer_dependency():

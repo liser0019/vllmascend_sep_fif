@@ -11,12 +11,12 @@
 #include "log/log.h"
 #include "register/op_def_registry.h"
 #include "tiling/platform/platform_ascendc.h"
+#include "../op_kernel/sparse_kv_plan_config.h"
 
 namespace optiling {
 namespace {
 constexpr uint64_t MIN_HASH_CAPACITY = 32U;
 constexpr uint64_t PLAN_ROW_UB_LIMIT_BYTES = 112U * 1024U;
-constexpr uint32_t PLAN_SCAN_BYTES = 544U;
 constexpr uint32_t PLAN_BLOCKS = 64U;
 
 uint64_t HashCapacity(int64_t topk) {
@@ -72,9 +72,15 @@ static ge::graphStatus SparseKvPlanTiling(gert::TilingContext* context) {
   const uint64_t hashCapacity = HashCapacity(topk);
   const uint64_t rowElements = 3U * hashCapacity + 2U * static_cast<uint64_t>(capacity) + static_cast<uint64_t>(topk);
   const uint64_t rowBytes = rowElements * sizeof(int32_t);
-  const uint64_t localBytes = PLAN_SCAN_BYTES + (rowBytes <= PLAN_ROW_UB_LIMIT_BYTES ? ((rowBytes + 31U) & ~31U) : 0U);
+  const uint64_t alignedRowBytes = (rowBytes + 31U) & ~static_cast<uint64_t>(31U);
+  const uint64_t localBytes =
+      sparse_kv_plan::PLAN_SCAN_BYTES + (alignedRowBytes <= PLAN_ROW_UB_LIMIT_BYTES ? alignedRowBytes : 0U);
   if (localBytes > std::numeric_limits<uint32_t>::max()) {
     return Fail(context, "SparseKvPlan local memory size overflow");
+  }
+  const uint32_t localMemoryBytes = static_cast<uint32_t>(localBytes);
+  if (context->SetDynUBufSize(localMemoryBytes) != ge::GRAPH_SUCCESS) {
+    return Fail(context, "SparseKvPlan failed to set dynamic UB size");
   }
 
   SparseKvPlanTilingData tiling;
@@ -88,7 +94,7 @@ static ge::graphStatus SparseKvPlanTiling(gert::TilingContext* context) {
   tiling.set_maxNumBlocks(maxNumBlocks);
   tiling.set_hostNumBlocks(hostNumBlocks);
   tiling.set_blockSize(static_cast<int32_t>(blockSize));
-  tiling.set_localMemoryBytes(static_cast<uint32_t>(localBytes));
+  tiling.set_localMemoryBytes(localMemoryBytes);
 
   auto platformInfo = context->GetPlatformInfo();
   if (platformInfo == nullptr) {

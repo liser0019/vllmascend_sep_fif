@@ -49,30 +49,29 @@
 #include "simt_api/device_atomic_functions.h"
 #include "simt_api/device_sync_functions.h"
 #include "simt_api/device_warp_functions.h"
+#include "sparse_kv_plan_config.h"
 
 namespace {
 
-constexpr uint32_t PLAN_THREADS = 2048U;
-constexpr uint32_t PLAN_WARP_SIZE = 32U;
-constexpr uint32_t PLAN_WARP_COUNT = PLAN_THREADS / PLAN_WARP_SIZE;
+using sparse_kv_plan::PLAN_SCAN_STORAGE_ELEMENTS;
+using sparse_kv_plan::PLAN_THREADS;
+using sparse_kv_plan::PLAN_WARP_COUNT;
+using sparse_kv_plan::PLAN_WARP_SIZE;
 constexpr int32_t INVALID_TOKEN = -1;
 constexpr int32_t HASH_EMPTY = -1;
 constexpr int32_t HASH_POSITION_EMPTY = INT32_MAX;
 constexpr uint32_t HASH_BUCKET_INVALID = UINT32_MAX;
 
-// scan 的动态 UB 布局，单位为 int32：
-// [0,64) warpTotals；[64,128) warpBases；[128,136) control，共 544 字节。
+// scan 的动态 UB 布局，单位为 int32。warp 区域均由线程数推导，
+// control 之后的 padding 保证单行 workspace 从 32 字节边界开始。
 constexpr uint32_t WARP_TOTALS_OFFSET = 0U;
 constexpr uint32_t WARP_BASES_OFFSET = PLAN_WARP_COUNT;
 constexpr uint32_t CONTROL_OFFSET = 2U * PLAN_WARP_COUNT;
 constexpr uint32_t CONTROL_TOTAL = 0U;
 constexpr uint32_t CONTROL_RESET = 1U;
-constexpr uint32_t CONTROL_ELEMENTS = 8U;
-constexpr uint32_t PLAN_SCAN_ELEMENTS = CONTROL_OFFSET + CONTROL_ELEMENTS;
-constexpr uint32_t PLAN_SCAN_BYTES = PLAN_SCAN_ELEMENTS * sizeof(int32_t);
 
 // 这是主动选择的快路径上限，不是硬件 UB 容量上限。
-// 动态 UB 最多为 112 KiB + 544 B，为 SIMT DCache 和系统预留区域留下空间。
+// 动态 UB 最多为 112 KiB + scan workspace，为 SIMT DCache 和系统预留区域留下空间。
 // 同一 block 顺序处理多行时复用这块内存，因此占用不随 batch 增长。
 constexpr uint32_t PLAN_ROW_UB_LIMIT_BYTES = 112U * 1024U;
 constexpr uint32_t PLAN_ROW_UB_LIMIT_ELEMENTS = PLAN_ROW_UB_LIMIT_BYTES / sizeof(int32_t);
@@ -82,9 +81,6 @@ constexpr uint32_t PLAN_ROW_UB_LIMIT_ELEMENTS = PLAN_ROW_UB_LIMIT_BYTES / sizeof
 constexpr uint32_t COUNT_SHIFT = 12U;
 constexpr int32_t COUNT_MASK = (1U << COUNT_SHIFT) - 1U;
 
-static_assert(PLAN_WARP_COUNT == 64U, "scan requires 64 warps");
-static_assert(PLAN_SCAN_BYTES == 544U, "scan layout must match launch");
-static_assert(PLAN_SCAN_BYTES % 32U == 0U, "UB must be 32-byte aligned");
 static_assert(PLAN_THREADS < (1U << COUNT_SHIFT), "packed scan would carry");
 
 struct SparseKvPlanTilingData {
@@ -102,19 +98,18 @@ struct SparseKvPlanTilingData {
 };
 
 /**
- * 对完整 2048-thread block 做独占前缀和，返回当前线程之前的输入总和。
+ * 对完整 SIMT block 做独占前缀和，返回当前线程之前的输入总和。
  * 输入可以是 0/1，也可以是打包后的 evict + (hit << 12)。
  *
  * 第一级：每个 warp 的 32 个线程用 shuffle 计算 inclusive scan。
- * 第二级：warp 0 的每个 lane 负责两个相邻 warp 的总数：a、b。
- *         先扫描 a+b，得到这对 warp 的起点 P，再分别写 P 和 P+a。
- * 因而 32 个 lane 可以完整覆盖 64 个 warp，后 1024 个线程不会漏算。
+ * 第二级：线程 0 顺序扫描所有 warp total，生成每个 warp 的起点。
+ * warp 数完全由 PLAN_THREADS 推导，后续调整线程数无需重写 scan 布局。
  *
  * 所有线程必须参加所有 barrier。尾 tile 的无效线程输入 0，不能提前返回。
  * 最后的 barrier 还保证所有线程已读取 warpBases，下一次 scan 才能复用它。
  */
-__simt_callee__ __aicore__ inline int32_t BlockExclusiveScan2048(__ubuf__ int32_t* workspace, int32_t value,
-                                                                 uint32_t thread) {
+__simt_callee__ __aicore__ inline int32_t BlockExclusiveScan(__ubuf__ int32_t* workspace, int32_t value,
+                                                             uint32_t thread) {
   __ubuf__ int32_t* warpTotals = workspace + WARP_TOTALS_OFFSET;
   __ubuf__ int32_t* warpBases = workspace + WARP_BASES_OFFSET;
   __ubuf__ int32_t* control = workspace + CONTROL_OFFSET;
@@ -132,27 +127,17 @@ __simt_callee__ __aicore__ inline int32_t BlockExclusiveScan2048(__ubuf__ int32_
   }
   asc_syncthreads();
 
-  if (warp == 0U) {
-    const uint32_t firstWarp = 2U * lane;
-    const int32_t a = warpTotals[firstWarp];
-    const int32_t pairTotal = a + warpTotals[firstWarp + 1U];
-    int32_t pairInclusive = pairTotal;
-    for (uint32_t offset = 1U; offset < PLAN_WARP_SIZE; offset <<= 1U) {
-      const int32_t prior = asc_shfl_up(pairInclusive, offset, PLAN_WARP_SIZE);
-      if (lane >= offset) {
-        pairInclusive += prior;
-      }
+  if (thread == 0U) {
+    int32_t blockTotal = 0;
+    for (uint32_t warpIndex = 0U; warpIndex < PLAN_WARP_COUNT; ++warpIndex) {
+      warpBases[warpIndex] = blockTotal;
+      blockTotal += warpTotals[warpIndex];
     }
-    const int32_t pairBase = pairInclusive - pairTotal;
-    warpBases[firstWarp] = pairBase;
-    warpBases[firstWarp + 1U] = pairBase + a;
+    control[CONTROL_TOTAL] = blockTotal;
   }
   asc_syncthreads();
 
   const int32_t exclusive = warpBases[warp] + inclusive - value;
-  if (thread == 0U) {
-    control[CONTROL_TOTAL] = warpBases[PLAN_WARP_COUNT - 1U] + warpTotals[PLAN_WARP_COUNT - 1U];
-  }
   asc_syncthreads();
   return exclusive;
 }
@@ -337,7 +322,7 @@ __simt_callee__ __aicore__ inline void ProcessRuntimeRow(
     }
     // 越界 LRU 项和尾部线程两种 flag 都为 0；不能把它们误当 evict。
     const int32_t packed = evictFlag + (hitFlag << COUNT_SHIFT);
-    const int32_t ranks = BlockExclusiveScan2048(scanWorkspace, packed, thread);
+    const int32_t ranks = BlockExclusiveScan(scanWorkspace, packed, thread);
     const int32_t totals = control[CONTROL_TOTAL];
     const int32_t evictRank = ranks & COUNT_MASK;
     const int32_t hitRank = ranks >> COUNT_SHIFT;
@@ -377,7 +362,7 @@ __simt_callee__ __aicore__ inline void ProcessRuntimeRow(
                                     maxNumBlocks, hostNumBlocks, blockSize) &&
                  currentSlots[topkBase + position] < 0;
     }
-    const int32_t rank = BlockExclusiveScan2048(scanWorkspace, missFlag, thread);
+    const int32_t rank = BlockExclusiveScan(scanWorkspace, missFlag, thread);
     const int32_t tileMissCount = control[CONTROL_TOTAL];
     if (missFlag != 0) {
       missPositions[localMissCount + rank] = static_cast<int32_t>(position);
@@ -435,7 +420,7 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(PLAN_THREADS) inline void SparseKvPlanRuntim
     int32_t blockSize) {
   for (int64_t row = rowStart; row < numReqs; row += rowStride) {
     if (workspaceRowElements <= PLAN_ROW_UB_LIMIT_ELEMENTS) {
-      __ubuf__ int32_t* rowWorkspace = scanWorkspace + PLAN_SCAN_ELEMENTS;
+      __ubuf__ int32_t* rowWorkspace = scanWorkspace + PLAN_SCAN_STORAGE_ELEMENTS;
       ProcessRuntimeRow(scanWorkspace, row, reqIds, lastReqIds, topkIndices, stablePrefixLens, visibleSeqLens,
                         tokenToReq, blockTable, slotToToken, lruSlots, currentSlots, missCount, missTokens, missSlots,
                         rowWorkspace, static_cast<uint32_t>(hashCapacity), static_cast<uint32_t>(topk),
