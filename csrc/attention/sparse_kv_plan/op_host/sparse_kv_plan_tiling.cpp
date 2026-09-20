@@ -16,7 +16,6 @@
 namespace optiling {
 namespace {
 constexpr uint64_t MIN_HASH_CAPACITY = 32U;
-constexpr uint64_t PLAN_ROW_UB_LIMIT_BYTES = 112U * 1024U;
 constexpr uint32_t PLAN_BLOCKS = 64U;
 
 uint64_t HashCapacity(int64_t topk) {
@@ -73,8 +72,8 @@ static ge::graphStatus SparseKvPlanTiling(gert::TilingContext* context) {
   const uint64_t rowElements = 3U * hashCapacity + 2U * static_cast<uint64_t>(capacity) + static_cast<uint64_t>(topk);
   const uint64_t rowBytes = rowElements * sizeof(int32_t);
   const uint64_t alignedRowBytes = (rowBytes + 31U) & ~static_cast<uint64_t>(31U);
-  const uint64_t localBytes =
-      sparse_kv_plan::PLAN_SCAN_BYTES + (alignedRowBytes <= PLAN_ROW_UB_LIMIT_BYTES ? alignedRowBytes : 0U);
+  const uint64_t localBytes = sparse_kv_plan::PLAN_SCAN_BYTES +
+                              (alignedRowBytes <= sparse_kv_plan::PLAN_ROW_UB_LIMIT_BYTES ? alignedRowBytes : 0U);
   if (localBytes > std::numeric_limits<uint32_t>::max()) {
     return Fail(context, "SparseKvPlan local memory size overflow");
   }

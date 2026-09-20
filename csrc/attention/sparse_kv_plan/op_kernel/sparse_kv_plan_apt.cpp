@@ -53,6 +53,7 @@
 
 namespace {
 
+using sparse_kv_plan::PLAN_ROW_UB_LIMIT_ELEMENTS;
 using sparse_kv_plan::PLAN_SCAN_STORAGE_ELEMENTS;
 using sparse_kv_plan::PLAN_THREADS;
 using sparse_kv_plan::PLAN_WARP_COUNT;
@@ -73,9 +74,6 @@ constexpr uint32_t CONTROL_RESET = 1U;
 // 这是主动选择的快路径上限，不是硬件 UB 容量上限。
 // 动态 UB 最多为 112 KiB + scan workspace，为 SIMT DCache 和系统预留区域留下空间。
 // 同一 block 顺序处理多行时复用这块内存，因此占用不随 batch 增长。
-constexpr uint32_t PLAN_ROW_UB_LIMIT_BYTES = 112U * 1024U;
-constexpr uint32_t PLAN_ROW_UB_LIMIT_ELEMENTS = PLAN_ROW_UB_LIMIT_BYTES / sizeof(int32_t);
-
 // 低 12 位表示 evict 数，高位表示 hit 数。
 // 每个 tile 最多 2048 项，而 2^12=4096，因此低位不会进位到 hit 字段。
 constexpr uint32_t COUNT_SHIFT = 12U;

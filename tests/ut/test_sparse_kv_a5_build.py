@@ -68,6 +68,12 @@ def test_sparse_kv_a5_sources_use_cann_91_interfaces():
     assert "PLAN_THREADS = 2048U" in plan_config
     assert "PLAN_WARP_COUNT = PLAN_THREADS / PLAN_WARP_SIZE" in plan_config
     assert "2U * PLAN_WARP_COUNT + PLAN_CONTROL_ELEMENTS" in plan_config
+    assert "PLAN_ROW_UB_LIMIT_BYTES = 112U * 1024U" in plan_config
+    assert "PLAN_ROW_UB_LIMIT_ELEMENTS = PLAN_ROW_UB_LIMIT_BYTES / sizeof(int32_t)" in plan_config
+    assert "PLAN_MAX_DYNAMIC_UB_BYTES = PLAN_SCAN_BYTES + PLAN_ROW_UB_LIMIT_BYTES" in plan_config
+    assert "PLAN_MAX_DYNAMIC_UB_BYTES <= 120U * 1024U" in plan_config
+    assert "constexpr uint64_t PLAN_ROW_UB_LIMIT_BYTES" not in plan_tiling
+    assert "constexpr uint32_t PLAN_ROW_UB_LIMIT_BYTES" not in plan_kernel
     assert "PLAN_WARP_COUNT == 64U" not in plan_kernel
     assert "warpIndex < PLAN_WARP_COUNT" in plan_kernel
     assert "scanWorkspace + PLAN_SCAN_STORAGE_ELEMENTS" in plan_kernel
