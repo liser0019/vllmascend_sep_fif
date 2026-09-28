@@ -1380,14 +1380,7 @@ class SparseKVOffloadManager:
         skip_topk: bool = False,
     ) -> None:
         del num_reqs, current_slots_npu, capturing
-        if token_to_req_npu is None:
-            raise ValueError("Sparse KV SIMT requires token_to_req metadata")
         layer_id = self._get_offload_layer_id(layer_name)
-        if num_tokens > self.max_num_topk_rows:
-            raise ValueError(
-                "Sparse KV offload topk rows exceed configured workspace, "
-                f"num_tokens={num_tokens}, max_num_topk_rows={self.max_num_topk_rows}"
-            )
         if layer_id in (0, self.mtp_layer_id):
             self.simt_lru.set_active_rows(num_tokens)
         # Backbone skip layers keep the same row mapping and mirror the Plan
@@ -1396,8 +1389,6 @@ class SparseKVOffloadManager:
         # be planned again even though the Indexer result itself is reused.
         reuse_previous_plan = skip_topk and layer_id != self.mtp_layer_id
         if reuse_previous_plan:
-            if layer_id == 0:
-                raise ValueError("Sparse KV SIMT cannot reuse TopK on the first offload layer")
             self.simt_lru.transfer_reused_plan(
                 layer_id=layer_id,
                 token_to_req=token_to_req_npu,

@@ -23,48 +23,6 @@ def sparse_kv_plan_workspace_elements(topk: int, capacity: int) -> int:
     return 3 * hash_capacity + 2 * capacity + topk
 
 
-def _validate_simt_lru_config(
-    *,
-    max_rows: int,
-    topk: int,
-    capacity: int,
-    max_token: int,
-    block_size: int,
-    host_num_blocks: int,
-    token_size_bytes_k: int,
-    token_size_bytes_v: int,
-    host_k_bases: list[int],
-    host_v_bases: list[int],
-    current_slots: torch.Tensor,
-) -> None:
-    dimensions = {
-        "max_rows": max_rows,
-        "topk": topk,
-        "capacity": capacity,
-        "max_token": max_token,
-        "block_size": block_size,
-        "host_num_blocks": host_num_blocks,
-        "token_size_bytes_k": token_size_bytes_k,
-        "token_size_bytes_v": token_size_bytes_v,
-    }
-    invalid = {name: value for name, value in dimensions.items() if value <= 0}
-    if invalid:
-        raise ValueError(f"Sparse KV SIMT dimensions must be positive, got {invalid}")
-    if topk > capacity:
-        raise ValueError(f"Sparse KV SIMT topk must not exceed capacity, got topk={topk}, capacity={capacity}")
-    if len(host_k_bases) != len(host_v_bases) or not host_k_bases:
-        raise ValueError("Sparse KV SIMT requires matching non-empty K/V host base lists")
-    if any(address <= 0 for address in (*host_k_bases, *host_v_bases)):
-        raise ValueError("Sparse KV SIMT Host DVA addresses must be positive")
-    if current_slots.dtype != torch.int32 or current_slots.shape != (max_rows, topk):
-        raise ValueError(
-            "Sparse KV SIMT current_slots must be int32 with shape "
-            f"[{max_rows}, {topk}], got dtype={current_slots.dtype}, shape={tuple(current_slots.shape)}"
-        )
-    if not current_slots.is_contiguous():
-        raise ValueError("Sparse KV SIMT current_slots must be contiguous")
-
-
 @dataclass
 class _SparseKVSimtLayerState:
     last_req_ids: torch.Tensor
@@ -100,19 +58,8 @@ class SparseKVSimtLru:
         current_slots: torch.Tensor,
         device: torch.device,
     ) -> None:
-        _validate_simt_lru_config(
-            max_rows=max_rows,
-            topk=topk,
-            capacity=capacity,
-            max_token=max_token,
-            block_size=block_size,
-            host_num_blocks=host_num_blocks,
-            token_size_bytes_k=token_size_bytes_k,
-            token_size_bytes_v=token_size_bytes_v,
-            host_k_bases=host_k_bases,
-            host_v_bases=host_v_bases,
-            current_slots=current_slots,
-        )
+        if max_rows <= 0 or topk <= 0 or topk > capacity:
+            raise ValueError(f"Invalid sparse KV SIMT shape: rows={max_rows}, topk={topk}, capacity={capacity}")
         self.max_rows = max_rows
         self.topk = topk
         self.capacity = capacity
@@ -148,12 +95,8 @@ class SparseKVSimtLru:
             for layer_id in range(len(host_k_bases))
         ]
 
-        ops = torch.ops._C_ascend
-        for op_name in ("npu_sparse_kv_plan_transfer", "npu_sparse_kv_transfer"):
-            if not hasattr(ops, op_name):
-                raise RuntimeError(f"Atlas A5 sparse KV offload requires _C_ascend.{op_name}")
-        self._plan_transfer_op = ops.npu_sparse_kv_plan_transfer
-        self._transfer_op = ops.npu_sparse_kv_transfer
+        self._plan_transfer_op = torch.ops._C_ascend.npu_sparse_kv_plan_transfer
+        self._transfer_op = torch.ops._C_ascend.npu_sparse_kv_transfer
 
     def set_active_rows(self, num_rows: int) -> None:
         if num_rows <= 0 or num_rows > self.max_rows:

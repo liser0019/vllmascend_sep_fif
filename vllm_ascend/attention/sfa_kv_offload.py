@@ -1128,15 +1128,9 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         if run_lru_plan:
             if decode_topk.ndim == 3 and decode_topk.shape[1] == 1:
                 decode_topk = decode_topk.squeeze(1)
-            if decode_topk.ndim != 2:
-                raise ValueError("Sparse KV offload top-k must have [tokens, topk] shape")
-            if manager.uses_simt_lru:
-                if decode_topk.dtype != torch.int32 or not decode_topk.is_contiguous():
-                    raise ValueError(
-                        "Sparse KV SIMT requires contiguous int32 Indexer output, "
-                        f"got dtype={decode_topk.dtype}, contiguous={decode_topk.is_contiguous()}"
-                    )
-            else:
+            if not manager.uses_simt_lru:
+                if decode_topk.ndim != 2:
+                    raise ValueError("Sparse KV offload top-k must have [tokens, topk] shape")
                 seq_len_thresholds = decode_seq_lens.view(decode_seq_lens.shape[0], 1)
                 valid_topk = build_valid_topk_mask(decode_topk, seq_len_thresholds)
                 decode_topk = torch.where(
