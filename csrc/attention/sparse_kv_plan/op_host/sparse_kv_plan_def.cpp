@@ -45,11 +45,17 @@ class SparseKvPlan : public OpDef {
     AddInt32Input(*this, "missSlots");
     AddInt32Input(*this, "compactWorkspace");
 
+    AddInt32Input(*this, "rowModes");
+    AddInt32Input(*this, "residentRows");
+    AddInt32Input(*this, "residentBlockTable");
+
     this->Attr("topk").AttrType(REQUIRED).Int();
     this->Attr("capacity").AttrType(REQUIRED).Int();
     this->Attr("maxToken").AttrType(REQUIRED).Int();
     this->Attr("blockSize").AttrType(REQUIRED).Int();
     this->Attr("hostNumBlocks").AttrType(REQUIRED).Int();
+
+    this->Attr("jointMtp").AttrType(OPTIONAL).Int(0);
 
     OpAICoreConfig config;
     config.DynamicCompileStaticFlag(true)

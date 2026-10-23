@@ -99,6 +99,8 @@ struct SparseKvPlanTilingData {
   int64_t hostNumBlocks;
   int32_t blockSize;
   uint32_t localMemoryBytes;
+  uint64_t jointHashCapacity;
+  uint64_t scratchElements;
 };
 
 
@@ -512,6 +514,8 @@ __simt_callee__ __aicore__ inline void ProcessRuntimeRow(
   asc_syncthreads();
 }
 
+#include "sparse_kv_joint_plan.h"
+
 /**
  * SIMT 调度层。是否使用 UB 对整个 block 一致，不会在 barrier 两侧发生线程分歧。
  * UB 路径复用当前 AIV 的单行 scratch；GM 路径按 row 切分用户的完整 workspace。
@@ -523,23 +527,50 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(PLAN_THREADS) inline void SparseKvPlanRuntim
     __gm__ int32_t* missCount, __gm__ int32_t* missTokens, __gm__ int32_t* missSlots, __gm__ int32_t* compactWorkspace,
     uint64_t hashCapacity, uint64_t workspaceRowElements, int64_t rowStart, int64_t rowStride, int64_t numReqs,
     int64_t topk, int64_t capacity, int64_t maxToken, int64_t maxRequests, int64_t maxNumBlocks, int64_t hostNumBlocks,
-    int32_t blockSize) {
-  for (int64_t row = rowStart; row < numReqs; row += rowStride) {
-    if (workspaceRowElements <= PLAN_ROW_UB_LIMIT_ELEMENTS) {
-      __ubuf__ int32_t* rowWorkspace = scanWorkspace + PLAN_SCAN_STORAGE_ELEMENTS;
-      ProcessRuntimeRow(scanWorkspace, row, reqIds, lastReqIds, topkIndices, stablePrefixLens, visibleSeqLens,
-                        tokenToReq, blockTable, slotToToken, lruSlots, currentSlots, missCount, missTokens, missSlots,
-                        rowWorkspace, static_cast<uint32_t>(hashCapacity), static_cast<uint32_t>(topk),
-                        static_cast<uint32_t>(capacity), static_cast<int32_t>(maxToken), maxRequests, maxNumBlocks,
-                        hostNumBlocks, blockSize);
-    } else {
-      __gm__ int32_t* rowWorkspace = compactWorkspace + static_cast<uint64_t>(row) * workspaceRowElements;
-      ProcessRuntimeRow(scanWorkspace, row, reqIds, lastReqIds, topkIndices, stablePrefixLens, visibleSeqLens,
-                        tokenToReq, blockTable, slotToToken, lruSlots, currentSlots, missCount, missTokens, missSlots,
-                        rowWorkspace, static_cast<uint32_t>(hashCapacity), static_cast<uint32_t>(topk),
-                        static_cast<uint32_t>(capacity), static_cast<int32_t>(maxToken), maxRequests, maxNumBlocks,
-                        hostNumBlocks, blockSize);
+    int32_t blockSize, __gm__ int32_t* rowModes, __gm__ int32_t* residentRows, __gm__ int32_t* residentBlockTable,
+    uint64_t jointHashCapacity, uint64_t scratchElements) {
+  const JointPlanArgs args{reqIds,
+                           lastReqIds,
+                           topkIndices,
+                           stablePrefixLens,
+                           visibleSeqLens,
+                           tokenToReq,
+                           blockTable,
+                           slotToToken,
+                           lruSlots,
+                           currentSlots,
+                           missCount,
+                           missTokens,
+                           missSlots,
+                           rowModes,
+                           residentRows,
+                           residentBlockTable,
+                           static_cast<uint32_t>(topk),
+                           static_cast<uint32_t>(capacity),
+                           static_cast<uint32_t>(hashCapacity),
+                           static_cast<uint32_t>(jointHashCapacity),
+                           static_cast<int32_t>(maxToken),
+                           blockSize,
+                           maxRequests,
+                           maxNumBlocks,
+                           hostNumBlocks};
+  int64_t group = 0;
+  for (int64_t row = jointHashCapacity != 0U ? 0 : rowStart; row < numReqs;) {
+    int64_t end = row + 1;
+    if (jointHashCapacity != 0U) {
+      while (end < numReqs && tokenToReq[end] == tokenToReq[row]) ++end;
     }
+    const bool assigned = jointHashCapacity == 0U || group % rowStride == rowStart;
+    if (assigned) {
+      if (scratchElements <= PLAN_ROW_UB_LIMIT_ELEMENTS) {
+        ProcessRequestRun(args, row, end, scanWorkspace + PLAN_SCAN_STORAGE_ELEMENTS, scanWorkspace);
+      } else {
+        ProcessRequestRun(args, row, end, compactWorkspace + static_cast<uint64_t>(row) * scratchElements,
+                          scanWorkspace);
+      }
+    }
+    ++group;
+    row = jointHashCapacity != 0U ? end : row + rowStride;
   }
 }
 
@@ -550,6 +581,7 @@ extern "C" __global__ __aicore__ void sparse_kv_plan(GM_ADDR reqIds, GM_ADDR top
                                                      GM_ADDR activeRows, GM_ADDR lastReqIds, GM_ADDR slotToToken,
                                                      GM_ADDR lruSlots, GM_ADDR currentSlots, GM_ADDR missCount,
                                                      GM_ADDR missTokens, GM_ADDR missSlots, GM_ADDR compactWorkspace,
+                                                     GM_ADDR rowModes, GM_ADDR residentRows, GM_ADDR residentBlockTable,
                                                      GM_ADDR workspace, GM_ADDR tiling) {
   (void)workspace;
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
@@ -579,5 +611,7 @@ extern "C" __global__ __aicore__ void sparse_kv_plan(GM_ADDR reqIds, GM_ADDR top
       reinterpret_cast<__gm__ int32_t*>(missTokens), reinterpret_cast<__gm__ int32_t*>(missSlots),
       reinterpret_cast<__gm__ int32_t*>(compactWorkspace), tilingData.hashCapacity, tilingData.workspaceRowElements,
       rowStart, rowStride, numRows, tilingData.topk, tilingData.capacity, tilingData.maxToken, tilingData.maxRequests,
-      tilingData.maxNumBlocks, tilingData.hostNumBlocks, tilingData.blockSize);
+      tilingData.maxNumBlocks, tilingData.hostNumBlocks, tilingData.blockSize,
+      reinterpret_cast<__gm__ int32_t*>(rowModes), reinterpret_cast<__gm__ int32_t*>(residentRows),
+      reinterpret_cast<__gm__ int32_t*>(residentBlockTable), tilingData.jointHashCapacity, tilingData.scratchElements);
 }

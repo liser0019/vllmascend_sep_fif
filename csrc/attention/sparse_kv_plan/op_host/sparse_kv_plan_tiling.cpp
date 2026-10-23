@@ -63,14 +63,20 @@ static ge::graphStatus SparseKvPlanTiling(gert::TilingContext* context) {
   if (blockTableOrigin.GetDim(0) != maxRequests || topkOrigin.GetDim(1) != topk) {
     return Fail(context, "SparseKvPlan input shapes do not match request/topk attributes");
   }
-  if (topk > std::numeric_limits<int32_t>::max() / 2 || capacity > std::numeric_limits<int32_t>::max() ||
+  if (topk > capacity || capacity % blockSize != 0) {
+    return Fail(context, "SparseKvPlan requires topk <= capacity and capacity divisible by blockSize");
+  }
+  if (topk > std::numeric_limits<int32_t>::max() / 2 || capacity > std::numeric_limits<int32_t>::max() / 2 ||
       maxToken > std::numeric_limits<int32_t>::max()) {
     return Fail(context, "SparseKvPlan shape exceeds int32 kernel limits");
   }
 
   const uint64_t hashCapacity = HashCapacity(topk);
   const uint64_t rowElements = 3U * hashCapacity + static_cast<uint64_t>(capacity) + static_cast<uint64_t>(topk);
-  const uint64_t rowBytes = rowElements * sizeof(int32_t);
+  const bool jointMtp = *attrs->GetInt(5) != 0;
+  const uint64_t jointHashCapacity = jointMtp ? HashCapacity(capacity) : 0U;
+  const uint64_t scratchElements = std::max(rowElements, 2U * jointHashCapacity + capacity);
+  const uint64_t rowBytes = scratchElements * sizeof(int32_t);
   const uint64_t alignedRowBytes = (rowBytes + 31U) & ~static_cast<uint64_t>(31U);
   const uint64_t localBytes = sparse_kv_plan_config::PLAN_SCAN_BYTES +
                               (alignedRowBytes <= sparse_kv_plan_config::PLAN_ROW_UB_LIMIT_BYTES ? alignedRowBytes : 0U);
@@ -83,6 +89,8 @@ static ge::graphStatus SparseKvPlanTiling(gert::TilingContext* context) {
   }
 
   SparseKvPlanTilingData tiling;
+  tiling.set_jointHashCapacity(jointHashCapacity);
+  tiling.set_scratchElements(scratchElements);
   tiling.set_hashCapacity(hashCapacity);
   tiling.set_workspaceRowElements(rowElements);
   tiling.set_maxRows(maxRows);

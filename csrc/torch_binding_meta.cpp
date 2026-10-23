@@ -115,24 +115,18 @@ void device_print_tensor_meta(const at::Tensor& tensor)
 }
 
 #ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
-void npu_sparse_kv_plan_transfer_meta(
-    const at::Tensor &, const at::Tensor &, const at::Tensor &,
-    const at::Tensor &, const at::Tensor &, const at::Tensor &,
-    const at::Tensor &, const at::Tensor &, const at::Tensor &,
-    const at::Tensor &, const at::Tensor &, const at::Tensor &,
-    const at::Tensor &, const at::Tensor &, const at::Tensor &,
-    const at::Tensor &, const at::Tensor &, const at::Tensor &,
-    int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)
-{
-}
+void npu_sparse_kv_plan_transfer_meta(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                                      const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                                      const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                                      const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                                      const at::Tensor&, const at::Tensor&, int64_t, int64_t, int64_t, int64_t, int64_t,
+                                      int64_t, int64_t, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                                      int64_t) {}
 
-void npu_sparse_kv_transfer_meta(
-    const at::Tensor &, const at::Tensor &, const at::Tensor &,
-    const at::Tensor &, const at::Tensor &, const at::Tensor &,
-    const at::Tensor &, const at::Tensor &, const at::Tensor &,
-    int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)
-{
-}
+void npu_sparse_kv_transfer_meta(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                                 const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                                 const at::Tensor&, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+                                 const at::Tensor&) {}
 #endif
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(

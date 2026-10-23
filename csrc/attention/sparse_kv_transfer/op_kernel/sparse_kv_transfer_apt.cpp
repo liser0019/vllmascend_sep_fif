@@ -26,9 +26,9 @@ struct SparseKvTransferTilingData {
 
 class SparseKvTransferRuntimeKernel {
  public:
-  __aicore__ inline void Init(GM_ADDR missCount, GM_ADDR missTokens, GM_ADDR missSlots, GM_ADDR tokenToReq,
-                              GM_ADDR blockTable, GM_ADDR hostCacheBases, GM_ADDR deviceKBase, GM_ADDR deviceVBase,
-                              int64_t numRows, int64_t maxRequests, int64_t topk, int64_t capacity,
+  __aicore__ inline void Init(GM_ADDR residentRows, GM_ADDR missCount, GM_ADDR missTokens, GM_ADDR missSlots,
+                              GM_ADDR tokenToReq, GM_ADDR blockTable, GM_ADDR hostCacheBases, GM_ADDR deviceKBase,
+                              GM_ADDR deviceVBase, int64_t numRows, int64_t maxRequests, int64_t topk, int64_t capacity,
                               int64_t maxNumBlocks, int64_t hostNumBlocks, int32_t blockSize, int32_t tokenSizeBytesK,
                               int32_t tokenSizeBytesV) {
     aivNum_ = AscendC::GetBlockNum();
@@ -36,6 +36,7 @@ class SparseKvTransferRuntimeKernel {
     missCount_ = reinterpret_cast<__gm__ int32_t*>(missCount);
     missTokens_ = reinterpret_cast<__gm__ int32_t*>(missTokens);
     missSlots_ = reinterpret_cast<__gm__ int32_t*>(missSlots);
+    residentRows_ = reinterpret_cast<__gm__ int32_t*>(residentRows);
     tokenToReq_ = reinterpret_cast<__gm__ int32_t*>(tokenToReq);
     blockTable_ = reinterpret_cast<__gm__ int32_t*>(blockTable);
     const __gm__ int64_t* bases = reinterpret_cast<__gm__ int64_t*>(hostCacheBases);
@@ -98,7 +99,7 @@ class SparseKvTransferRuntimeKernel {
                                  static_cast<uint64_t>(offsetInBlock) * tokenSizeBytesK_;
         const uint64_t sourceV = hostVBase_ + static_cast<uint64_t>(blockIndex) * blockBytesV_ +
                                  static_cast<uint64_t>(offsetInBlock) * tokenSizeBytesV_;
-        const uint64_t linearSlot = static_cast<uint64_t>(row) * capacity_ + slot;
+        const uint64_t linearSlot = static_cast<uint64_t>(residentRows_[row]) * capacity_ + slot;
         const uint64_t destinationK = deviceKBase_ + linearSlot * tokenSizeBytesK_;
         const uint64_t destinationV = deviceVBase_ + linearSlot * tokenSizeBytesV_;
 
@@ -165,6 +166,7 @@ class SparseKvTransferRuntimeKernel {
   __gm__ int32_t* missCount_ = nullptr;
   __gm__ int32_t* missTokens_ = nullptr;
   __gm__ int32_t* missSlots_ = nullptr;
+  __gm__ int32_t* residentRows_ = nullptr;
   __gm__ int32_t* tokenToReq_ = nullptr;
   __gm__ int32_t* blockTable_ = nullptr;
   uint64_t hostKBase_ = 0U;
@@ -189,7 +191,7 @@ class SparseKvTransferRuntimeKernel {
 extern "C" __global__ __aicore__ void sparse_kv_transfer(GM_ADDR missCount, GM_ADDR missTokens, GM_ADDR missSlots,
                                                          GM_ADDR tokenToReq, GM_ADDR blockTable, GM_ADDR hostCacheBases,
                                                          GM_ADDR activeRows, GM_ADDR residentK, GM_ADDR residentV,
-                                                         GM_ADDR workspace, GM_ADDR tiling) {
+                                                         GM_ADDR residentRows, GM_ADDR workspace, GM_ADDR tiling) {
   (void)workspace;
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
   REGISTER_TILING_DEFAULT(SparseKvTransferTilingData);
@@ -199,8 +201,8 @@ extern "C" __global__ __aicore__ void sparse_kv_transfer(GM_ADDR missCount, GM_A
                               ? requestedRows
                               : (requestedRows > 0 ? tilingData.maxRows : 0);
   SparseKvTransferRuntimeKernel kernel;
-  kernel.Init(missCount, missTokens, missSlots, tokenToReq, blockTable, hostCacheBases, residentK, residentV, numRows,
-              tilingData.maxRequests, tilingData.topk, tilingData.capacity, tilingData.maxNumBlocks,
+  kernel.Init(residentRows, missCount, missTokens, missSlots, tokenToReq, blockTable, hostCacheBases, residentK,
+              residentV, numRows, tilingData.maxRequests, tilingData.topk, tilingData.capacity, tilingData.maxNumBlocks,
               tilingData.hostNumBlocks, tilingData.blockSize, tilingData.tokenSizeBytesK, tilingData.tokenSizeBytesV);
   kernel.Process();
 }

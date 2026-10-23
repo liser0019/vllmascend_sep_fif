@@ -45,6 +45,8 @@ class SparseKvTransfer : public OpDef {
         .UnknownShapeFormat({ge::FORMAT_ND})
         .AutoContiguous();
 
+    AddInt32Input(*this, "residentRows");
+
     this->Attr("topk").AttrType(REQUIRED).Int();
     this->Attr("capacity").AttrType(REQUIRED).Int();
     this->Attr("blockSize").AttrType(REQUIRED).Int();

@@ -582,6 +582,7 @@ class SparseKVOffloadManager:
         decode_width = 1
         if vllm_config.speculative_config is not None:
             decode_width += vllm_config.speculative_config.num_speculative_tokens
+        self.joint_mtp_lru = self.uses_simt_lru and decode_width > 1
         self.max_num_topk_rows = min(
             self.max_num_tokens,
             self.max_num_reqs * decode_width,
@@ -880,6 +881,8 @@ class SparseKVOffloadManager:
             host_v_bases=self.dvas_v_bases,
             current_slots=self.current_slots_npu,
             device=device,
+            resident_block_table=self.resident_block_table_npu,
+            joint_mtp=self.joint_mtp_lru,
         )
         self._onload_topk_kv_impl = self._onload_topk_kv_simt
         logger.info_once("Sparse KV offload uses the Atlas A5 NPU SIMT LRU planner with persistent device state.")

@@ -20,6 +20,8 @@ TILING_DATA_FIELD_DEF(int64_t, maxNumBlocks);
 TILING_DATA_FIELD_DEF(int64_t, hostNumBlocks);
 TILING_DATA_FIELD_DEF(int32_t, blockSize);
 TILING_DATA_FIELD_DEF(uint32_t, localMemoryBytes);
+TILING_DATA_FIELD_DEF(uint64_t, jointHashCapacity);
+TILING_DATA_FIELD_DEF(uint64_t, scratchElements);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(SparseKvPlan, SparseKvPlanTilingData)

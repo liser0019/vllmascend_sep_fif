@@ -3001,7 +3001,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor(f!) miss_tokens, Tensor(g!) miss_slots, Tensor(h!) compact_workspace, "
         "Tensor host_cache_bases, Tensor(i!) resident_k, Tensor(j!) resident_v, "
         "int topk, int capacity, int max_token, int block_size, int host_num_blocks, "
-        "int token_size_bytes_k, int token_size_bytes_v) -> ()");
+        "int token_size_bytes_k, int token_size_bytes_v, Tensor(k!) resident_rows, "
+        "Tensor(l!) row_modes, Tensor(m!) resident_block_table, int joint_mtp) -> ()");
     ops.impl("npu_sparse_kv_plan_transfer", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_kv_plan_transfer);
 
@@ -3011,7 +3012,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor token_to_req, Tensor block_table, Tensor host_cache_bases, "
         "Tensor active_rows, Tensor(a!) resident_k, Tensor(b!) resident_v, "
         "int topk, int capacity, int block_size, int host_num_blocks, "
-        "int token_size_bytes_k, int token_size_bytes_v) -> ()");
+        "int token_size_bytes_k, int token_size_bytes_v, Tensor resident_rows) -> ()");
     ops.impl("npu_sparse_kv_transfer", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_kv_transfer);
 

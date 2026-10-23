@@ -31,6 +31,7 @@ class _SparseKVSimtLayerState:
     miss_count: torch.Tensor
     miss_tokens: torch.Tensor
     miss_slots: torch.Tensor
+    row_modes: torch.Tensor
     host_cache_bases: torch.Tensor
 
 
@@ -57,6 +58,8 @@ class SparseKVSimtLru:
         host_v_bases: list[int],
         current_slots: torch.Tensor,
         device: torch.device,
+        resident_block_table: torch.Tensor,
+        joint_mtp: bool = False,
     ) -> None:
         if max_rows <= 0 or topk <= 0 or topk > capacity:
             raise ValueError(f"Invalid sparse KV SIMT shape: rows={max_rows}, topk={topk}, capacity={capacity}")
@@ -69,10 +72,15 @@ class SparseKVSimtLru:
         self.token_size_bytes_k = token_size_bytes_k
         self.token_size_bytes_v = token_size_bytes_v
         self.current_slots = current_slots
+        self.joint_mtp = joint_mtp
+        self.resident_block_table = resident_block_table
+        self.resident_rows = torch.arange(max_rows, dtype=torch.int32, device=device)
         self.active_rows = torch.zeros(1, dtype=torch.int32, device=device)
         self.plan_owner_layer_id: int | None = None
 
         row_elements = sparse_kv_plan_workspace_elements(topk, capacity)
+        if joint_mtp:
+            row_elements = max(row_elements, 2 * sparse_kv_plan_hash_capacity(capacity) + capacity)
         workspace_elements = (
             1 if row_elements * torch.int32.itemsize <= _PLAN_ROW_UB_LIMIT_BYTES else max_rows * row_elements
         )
@@ -80,6 +88,7 @@ class SparseKVSimtLru:
         initial_lru = torch.arange(capacity, dtype=torch.int32, device=device).view(1, capacity)
         self.layers = [
             _SparseKVSimtLayerState(
+                row_modes=torch.zeros(max_rows, dtype=torch.int32, device=device),
                 last_req_ids=torch.full((max_rows,), -1, dtype=torch.int64, device=device),
                 slot_to_token=torch.full((max_rows, capacity), -1, dtype=torch.int32, device=device),
                 lru_slots=initial_lru.repeat(max_rows, 1),
@@ -143,6 +152,10 @@ class SparseKVSimtLru:
             self.host_num_blocks,
             self.token_size_bytes_k,
             self.token_size_bytes_v,
+            self.resident_rows,
+            state.row_modes,
+            self.resident_block_table,
+            int(self.joint_mtp),
         )
         self.plan_owner_layer_id = layer_id
 
@@ -175,4 +188,5 @@ class SparseKVSimtLru:
             self.host_num_blocks,
             self.token_size_bytes_k,
             self.token_size_bytes_v,
+            self.resident_rows,
         )
